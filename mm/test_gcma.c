@@ -26,6 +26,8 @@
 #include <linux/module.h>
 #include <linux/gcma.h>
 #include <linux/mm.h>
+#include <linux/rbtree.h>
+#include <linux/slab.h>
 
 /*********************************
 * tunables
@@ -41,6 +43,95 @@ extern int gcma_frontswap_load(unsigned type, pgoff_t offset,
 		struct page *page);
 extern void gcma_frontswap_invalidate_page(unsigned type, pgoff_t offset);
 extern void gcma_frontswap_invalidate_area(unsigned type);
+
+struct rb_entry {
+	unsigned long key;
+	int value;
+	struct rb_node rbnode;
+};
+
+static int rb_insert(struct rb_root *root, struct rb_entry *entry,
+		struct rb_entry **dupentry)
+{
+	struct rb_node **link = &root->rb_node, *parent = NULL;
+	struct rb_entry *ientry;
+
+	while (*link) {
+		parent = *link;
+		ientry = rb_entry(parent, struct rb_entry, rbnode);
+		if (ientry->key > entry->key)
+			link = &(*link)->rb_left;
+		else if (ientry->key < entry->key)
+			link = &(*link)->rb_right;
+		else {
+			*dupentry = ientry;
+			return -EEXIST;
+		}
+	}
+	rb_link_node(&entry->rbnode, parent, link);
+	rb_insert_color(&entry->rbnode, root);
+	return 0;
+}
+
+static void rbtest_erase(struct rb_root *root, struct rb_entry *entry)
+{
+	if (!RB_EMPTY_NODE(&entry->rbnode)) {
+		rb_erase(&entry->rbnode, root);
+		RB_CLEAR_NODE(&entry->rbnode);
+	}
+}
+
+static struct rb_entry *rb_search(struct rb_root *root, unsigned long key)
+{
+	struct rb_node *node = root->rb_node;
+	struct rb_entry *entry;
+
+	while (node) {
+		entry = rb_entry(node, struct rb_entry, rbnode);
+		if (entry->key > key)
+			node = node->rb_left;
+		else if (entry->key < key)
+			node = node->rb_right;
+		else
+			return entry;
+	}
+	return NULL;
+}
+
+static int test_rbtree(void)
+{
+	struct rb_root *rbroot = &RB_ROOT;
+	struct rb_entry *entry, *dupentry, *got_entry;
+	int i;
+
+	for (i = 0; i < 200; i++) {
+		entry = kzalloc(sizeof(struct rb_entry),
+				GFP_KERNEL);
+		if (!entry) {
+			pr_warn("failed to alloc entry\n");
+			return -1;
+		}
+		entry->key = i;
+		entry->value = i * 2;
+		rb_insert(rbroot, entry, &dupentry);
+	}
+	for (i = 0; i < 200; i++) {
+		got_entry = rb_search(rbroot, i);
+		pr_info("key: %ld, value: %d\n",
+				got_entry->key, got_entry->value);
+		if (got_entry->value != i * 2) {
+			pr_warn("found value is wrong\n");
+			return -1;
+		}
+	}
+
+	for (i = 0; i < 200; i++) {
+		got_entry = rb_search(rbroot, i);
+		rbtest_erase(rbroot, got_entry);
+		kfree(got_entry);
+	}
+	return 0;
+}
 
 static int test_frontswap(void)
 {
@@ -147,6 +238,7 @@ static int __init init_gcma(void)
 
 	do_test(test_alloc_release_contig);
 	do_test(test_frontswap);
+	do_test(test_rbtree);
 
 	return 0;
 }
