@@ -1,0 +1,2 @@
+0x720ac2fd	runqueues	/usr/src/linux-3.10.10/dccm_module/dccm_module	EXPORT_SYMBOL
+0x245f6240	is_zero_pfn	/root/module_husung_scan/husung_scan	EXPORT_SYMBOL

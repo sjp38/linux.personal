@@ -1,0 +1,133 @@
+#include <linux/init.h>
+#include <linux/sched.h>
+#include <linux/module.h>                                   
+#include <linux/moduleparam.h>                              
+#include <linux/random.h>                                   
+#include <linux/mm.h>                                       
+                                                            
+#define SAME_TYPE 0
+#if SAME_TYPE
+static int same_type = 0;
+#endif
+extern unsigned long (*_generate_color_bitmap)(void);       
+                                                            
+static char *name1;
+module_param(name1, charp, 0);
+static char *name2;
+module_param(name2, charp, 0);
+static int cache1 = 0;
+module_param(cache1, int, 0);
+static int cache2 = 0;
+module_param(cache2, int, 0);
+static char *name3;
+module_param(name3, charp, 0);
+static char *name4;
+module_param(name4, charp, 0);
+static int cache3 = 0;
+module_param(cache3, int, 0);
+static int cache4 = 0;
+module_param(cache4, int, 0);
+
+
+unsigned long my_generate_color_bitmap(void)
+{                                                           
+	char pname[TASK_COMM_LEN];  /* [DCSLAB] for saving process's name */ 
+	struct task_struct *tsk = current;
+	struct mm_struct *mm = tsk->mm;
+	if(mm) {
+	    get_task_comm(pname,tsk);       /* copy process's name into pname */ 
+        if (strstr(pname, name1)!=NULL) {
+			if (cache1==NUM_OF_COLORS)
+				return -1;
+#if SAME_TYPE
+			if (same_type) {
+				same_type = 0;
+				return ((1UL << cache1) - 1) << cache1;   /* another half of the colors for mcf3 */
+			} else {
+				same_type = 1;
+				return ((1UL << cache1) - 1);    /* first half of the colors for xalancbmk */
+			}
+#endif
+			//return ((1UL << cache1) - 1);    /* first half of the colors for xalancbmk */
+			return 0xFFFF;
+        } else if (strstr(pname, name2)!=NULL) {
+			if (cache2==NUM_OF_COLORS)
+				return -1;
+            //return ((1UL << cache2) - 1) << cache1;   /* another half of the colors for mcf3 */
+		return 0xFFFFFFFFFFFF0000;
+        } else if (strstr(pname, name3)!=NULL) {
+			if (cache3==NUM_OF_COLORS)
+				return -1;
+            //return ((1UL << cache3) - 1) << cache1;   /* another half of the colors for mcf3 */
+		return 0xFFFFFFFFFFFF0000;
+        } else if (strstr(pname, name4)!=NULL) {
+			if (cache4==NUM_OF_COLORS)
+				return -1;
+            //return ((1UL << cache4) - 1) << cache1;   /* another half of the colors for mcf3 */
+		return 0xFFFFFFFFFFFF0000;
+        }
+
+
+ 	}   
+	return 0UL;
+} 
+
+static int color_init(void)
+{
+	if (name1==NULL || name2==NULL || cache1==0 || cache2==0 || name3==NULL || name4==NULL || cache3==0 || cache4==0) {
+		printk("[DCSLAB] INIT: failed to initialize static_cp_module\n");
+	} else {
+		//test("sphinx_liv");
+		//test("libquantum");
+		printk("[DCSLAB] INIT: ( %s : %s : %s : %s ) = ( %d : %d : %d : %d)\n", name1, name2, name3, name4, cache1, cache2, cache3, cache4);
+		_generate_color_bitmap = my_generate_color_bitmap;
+	}
+	return 0;
+}
+static void color_exit(void)
+{
+	printk("[DCSLAB] EXIT: static cp module.\n");
+	_generate_color_bitmap = NULL;
+}
+
+module_init(color_init);
+module_exit(color_exit);
+
+MODULE_LICENSE("GPL");
+#if 0
+void print_bitmap(unsigned long bitmap)
+{
+	static char s[64 + 1] = {'0',};
+	int i = NUM_OF_COLORS;
+	printk("bitmap(%lu) = ", bitmap);
+	do {
+		s[--i] = '0' + (char)(bitmap&1);
+		bitmap = bitmap >> 1;
+	} while (i);
+	printk("%s\n",s);
+}
+
+void test(char *name)
+{
+	unsigned long bitmap; 
+	if (strstr(name, name1)!=NULL) {
+		if (cache1==NUM_OF_COLORS) {
+			bitmap = -1;
+		} else {
+			bitmap = (1UL<<cache1)-1;
+		}
+		printk("[DCSLAB] %s for %d colors => ", name1,cache1);
+		printk("bitmap(%lu) = %lX\n",bitmap,bitmap);
+		print_bitmap(bitmap);
+	} else if (strstr(name, name2)!=NULL) {
+		if (cache2==NUM_OF_COLORS) {
+			bitmap = -1;
+		} else {
+			bitmap = ((1UL<<cache2)-1) << cache1;
+		}
+		printk("[DCSLAB] %s for %d colors => ", name2,cache2);
+		printk("bitmap(%lu) = %lX\n",bitmap,bitmap);
+		print_bitmap(bitmap);
+	}
+}
+#endif

@@ -1,0 +1,1010 @@
+#include <linux/migrate.h>
+#include <linux/memory_hotplug.h>
+#include <linux/pagemap.h>
+#include <linux/rmap.h>
+#include <linux/init.h>
+#include <linux/cpu.h>
+#include <linux/percpu.h>
+#include <linux/module.h>
+#include <linux/kthread.h>
+#include <linux/wait.h>
+#include <linux/kernel.h>
+#include <linux/ioport.h>
+#include <asm/io.h>
+#include <linux/delay.h>
+#include <linux/sched.h>
+#include <linux/moduleparam.h>
+#include <linux/mm.h>
+#include <asm/pgtable.h>
+#include <linux/spinlock.h>
+#include <linux/slab.h>
+#include <linux/mm.h>
+#include <asm-generic/pgtable.h>
+
+//[DCSLAB]
+#include <linux/lockdep.h>
+#include <asm/tlbflush.h>
+#include <linux/time.h>
+#include <linux/mmu_notifier.h>
+#include <linux/preempt.h>
+#include "../kernel/sched/sched.h"
+#include "../mm/internal.h"
+#include <linux/memory_hotplug.h>
+
+
+#define DEBUG_FILE 1
+
+#ifdef DEBUG_FILE
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/syscalls.h>
+#include <linux/fcntl.h>
+#include <asm/uaccess.h>
+#endif
+
+//#define DEBUG_TIME
+
+#define DEBUG 1
+#define NR_CORES_PER_NODE 8
+#define NR_NODES_IN_SYSTEM 4
+#define NR_COLORS_IN_CACHE NUM_OF_COLORS
+#define POLLUTE_COLOR (NR_COLORS_IN_CACHE - 1)
+#define NR_NORMAL_COLORS POLLUTE_COLOR
+#define DEBUG_DURATION 128
+#define SCAN_TIME_WINDOW_US 1000
+#define SCAN_FREQUENCY_MS 100
+
+#define NR_ACCESS_HISTORY_LOCAL 64
+
+//#define NR_VICTIM_COLORS 2
+#define NR_VICTIM_COLORS 4
+
+#define NO_COLOR (-1)
+
+extern uint8_t * (*_cadpm_create_access_history)(struct task_struct *tsk);
+extern struct task_struct *get_rq_task(int cpu);
+struct task_struct *cadpm_manager;
+
+static const unsigned int INIT_DECISION_TURN = NR_ACCESS_HISTORY_LOCAL - 1;
+static const unsigned int NEXT_DECISION_TURN = NR_ACCESS_HISTORY_LOCAL;
+
+static char *output;
+unsigned int local_hotness[NR_CORES_PER_NODE][NR_COLORS_IN_CACHE] = {{0, }, {0, }};
+unsigned int global_hotness[NR_COLORS_IN_CACHE] = {0, };
+unsigned int global_hotness_index[NR_COLORS_IN_CACHE] = {0, };
+unsigned int hot_colors[NR_VICTIM_COLORS] = {0, };
+unsigned int cold_colors[NR_VICTIM_COLORS] = {0, };
+unsigned int need_decay = 0;
+
+#ifdef DEBUG_FILE
+struct file* fp;
+loff_t offset = 0;
+char buf[1024];
+#endif
+
+module_param(output, charp, 0);
+
+static struct file* file_open(const char *path, int flags, int rights)
+{
+	struct file* filp = NULL;
+	mm_segment_t oldfs;
+	int err = 0;
+
+	oldfs = get_fs();
+	set_fs(get_ds());
+	filp = filp_open(path, flags, rights);
+	set_fs(oldfs);
+	if (IS_ERR(filp)) {
+		err = PTR_ERR(filp);
+		return NULL;
+	}
+	return filp;
+}
+
+static void file_close(struct file* file)
+{
+	filp_close(file, NULL);
+}
+
+static int file_write(struct file* file, unsigned char* data, unsigned int size, loff_t* off)
+{
+	mm_segment_t oldfs;
+	int ret;
+	oldfs = get_fs();
+	set_fs(get_ds());
+
+	ret = vfs_write(file, data, size, off);
+
+	set_fs(oldfs);
+	return ret;
+}
+
+struct cadpm_shared_data {
+	atomic_t thread_count;
+	wait_queue_head_t manager_wq;
+	unsigned int cur_turn;
+};
+
+struct cadpm_worker_args {
+	struct cadpm_shared_data *sd;
+	wait_queue_head_t *worker_wq;
+	struct task_struct *target_tsk;
+	unsigned int *start_flag;
+};
+
+static inline void cadpm_init_shared_data(struct cadpm_shared_data *sd)
+{
+	atomic_set(&sd->thread_count, 0);
+	init_waitqueue_head(&sd->manager_wq);
+	sd->cur_turn = 0;
+}
+
+static inline void cadpm_init_worker_args(struct cadpm_worker_args* data, struct cadpm_shared_data *sd)
+{
+	int i;
+	cadpm_init_shared_data(sd);
+	for (i=0; i<NR_CORES_PER_NODE; i++) {
+		data[i].sd = sd;
+		data[i].worker_wq = NULL;
+		data[i].target_tsk = NULL;
+		data[i].start_flag = NULL;
+	}
+}
+
+static inline signed long long get_time(void)
+{
+	struct timespec ts;
+	getnstimeofday(&ts);
+	return timespec_to_ns(&ts);
+}
+
+#if 0
+void cadpm_flush_tlb_mm(struct mm_struct *mm)
+{
+	preempt_disable();
+	local_flush_tlb();
+	flush_tlb_others(mm_cpumask(mm), mm, 0UL, TLB_FLUSH_ALL);
+	preempt_enable();
+	//preempt_enable_no_resched();
+}
+#endif
+
+uint8_t *cadpm_create_access_history(struct task_struct *tsk)
+{
+	uint8_t *access_history;
+	//if ((strncmp("sphinx", tsk->comm, sizeof("sphinx") - 1) == 0) || (strncmp("libquantum", tsk->comm, sizeof("libquantum") - 1) == 0) || (strncmp("astar", tsk->comm, sizeof("astar") - 1) == 0)) {
+		access_history = kzalloc(NR_COLORS_IN_CACHE * NR_ACCESS_HISTORY_LOCAL * sizeof(uint8_t), GFP_KERNEL);
+		if (access_history) {
+			return access_history;
+		} else {
+			printk("create_access_history_array: kzalloc failed\n");
+			return NULL;
+		}
+	//}
+	return NULL;
+}
+
+static inline unsigned int get_cur_history_idx(unsigned int cur_turn)
+{
+	return cur_turn & (NR_ACCESS_HISTORY_LOCAL - 1);
+}
+
+static inline void clear_access_history(struct mm_struct *target_mm, unsigned int target_idx)
+{
+	unsigned int color;
+	unsigned int idx;
+	struct mm_struct *mm = target_mm;
+	for (color = 0; color < NR_COLORS_IN_CACHE; color++) {
+		idx = (color * NR_ACCESS_HISTORY_LOCAL) + target_idx;
+		mm->access_history[idx] = 0;
+	}
+}
+static inline void cadpm_clear_access_history(struct mm_struct *mm, unsigned int cur_turn)
+{
+	unsigned int last_updated_turn = mm->last_updated_turn;
+	unsigned int cur_history_idx = get_cur_history_idx(cur_turn);
+	unsigned int last_updated_idx = get_cur_history_idx(last_updated_turn);
+	unsigned int idx;
+
+	if (last_updated_turn < cur_turn) {
+		if ((cur_turn - last_updated_turn) >= NR_ACCESS_HISTORY_LOCAL) {
+			//all
+			for (idx = 0; idx < NR_ACCESS_HISTORY_LOCAL; idx++) {
+				clear_access_history(mm, idx);	
+			}
+		} else {
+			if (last_updated_idx < cur_history_idx) {
+				// last ~ cur
+				for (idx = last_updated_idx; idx <= cur_history_idx; idx++) {
+					clear_access_history(mm, idx);
+				}
+			} else {
+				// last ~ end
+				for (idx = last_updated_idx; idx < NR_ACCESS_HISTORY_LOCAL; idx++) {
+					clear_access_history(mm, idx);
+				}
+				// start ~ cur
+				for (idx = 0; idx <= cur_history_idx; idx++) {
+					clear_access_history(mm, idx);
+				}
+			}
+		}
+	} else {
+		//all
+		for (idx = 0; idx < NR_ACCESS_HISTORY_LOCAL; idx++) {
+			clear_access_history(mm, idx);	
+		}
+	}
+
+}
+
+static inline unsigned int cadpm_get_color(unsigned long pfn)
+{
+	return pfn & (NR_COLORS_IN_CACHE - 1);
+}
+
+static inline unsigned int cadpm_record_access_history(struct mm_struct *mm, unsigned long pfn)
+{
+	unsigned int color = cadpm_get_color(pfn);
+	unsigned int cur_idx = (color * NR_ACCESS_HISTORY_LOCAL) + mm->cur_history_idx;
+	unsigned int updated_cnt = (unsigned int)mm->access_history[cur_idx];
+	updated_cnt++;
+	if (unlikely(updated_cnt > 0xFF)) {
+		//printk("%s[color:%u][idx:%u]'s access count is overflowed: %u\n", mm->owner->comm, color, mm->cur_history_idx, updated_cnt);
+	} else {
+		mm->access_history[cur_idx] = (unsigned char)updated_cnt;
+	}
+	return updated_cnt;
+}
+
+static inline int cadpm_calculate_local_hotness(struct task_struct* tsk, unsigned int cpu)
+{
+	struct mm_struct *mm = get_task_mm(tsk);
+	uint8_t *access_history;
+	unsigned int cur_idx;
+	unsigned int temp_hotness;
+	unsigned int recency_weight;
+	unsigned int color, idx;
+	if (mm) {
+		access_history = mm->access_history;
+		if (access_history) {
+			cur_idx = mm->cur_history_idx;
+			for (color = 0; color < NR_COLORS_IN_CACHE; color++) {
+				temp_hotness = 0;
+				for (idx = 0; idx < NR_ACCESS_HISTORY_LOCAL; idx++) {
+					unsigned int temp;
+					recency_weight = (cur_idx >= idx)? (NR_ACCESS_HISTORY_LOCAL - (cur_idx - idx)) : (idx - cur_idx); 
+					temp = recency_weight * (unsigned int)access_history[(color * NR_ACCESS_HISTORY_LOCAL) + idx];
+					temp_hotness += temp;
+				}
+				local_hotness[cpu][color] += temp_hotness;
+			}
+			mmput(mm);
+			return 1;
+		} else {
+			mmput(mm);
+			return 0;
+		}
+	} else {
+		return 0;
+	}
+}
+
+static inline void cadpm_swap(unsigned int *a, unsigned int *b)
+{
+	unsigned int t = *a;
+	*a = *b;
+	*b = t;
+}
+
+static inline int cadpm_compare(const void *a, const void *b)
+{
+	return *(int *)a - *(int *)b;
+}
+
+static inline void cadpm_sort(void *base, void *index, size_t num, size_t size,
+	   int (*cmp_func)(const void *, const void *),
+	   void (*swap_func)(unsigned int *, unsigned int *))
+{
+	/* pre-scale counters for performance */
+	int i = (num/2 - 1) * size, n = num * size, c, r;
+
+	/* heapify */
+	for ( ; i >= 0; i -= size) {
+		for (r = i; r * 2 + size < n; r  = c) {
+			c = r * 2 + size;
+			if (c < n - size && cmp_func(base + c, base + c + size) < 0)
+				c += size;
+			if (cmp_func(base + r, base + c) >= 0)
+				break;
+			swap_func(base + r, base + c);
+			swap_func(index + r, index + c);
+		}
+	}
+
+	/* sort */
+	for (i = n - size; i > 0; i -= size) {
+		swap_func(base, base + i);
+		swap_func(index, index + i);
+		for (r = 0; r * 2 + size < i; r = c) {
+			c = r * 2 + size;
+			if (c < i - size && cmp_func(base + c, base + c + size) < 0)
+				c += size;
+			if (cmp_func(base + r, base + c) >= 0)
+				break;
+			swap_func(base + r, base + c);
+			swap_func(index + r, index + c);
+		}
+	}
+}
+
+static inline void cadpm_init_global_hotness_index(void)
+{
+	int i;
+	for (i = 0; i < NR_COLORS_IN_CACHE; i++) {
+		global_hotness_index[i] = i;
+	}
+}
+
+static inline unsigned long cadpm_calculate_global_hotness(void) 
+{
+	unsigned int color;
+	unsigned long variance = 0;
+	unsigned long tmp1 = 0;
+	unsigned long tmp2 = 0;
+	for (color = 0; color < NR_COLORS_IN_CACHE; color++) {
+		global_hotness[color] = local_hotness[0][color] + local_hotness[1][color] + local_hotness[2][color] + local_hotness[3][color] + local_hotness[4][color] + local_hotness[5][color] + local_hotness[6][color] + local_hotness[7][color];
+		// calculate global hotness for color n 
+#ifdef DEBUG_FILE
+		if (fp)
+			sprintf(buf + strlen(buf), "%u,", global_hotness[color]);
+#endif
+		if (color == POLLUTE_COLOR) 
+			break;
+
+		tmp1 += (unsigned long)global_hotness[color] * (unsigned long)global_hotness[color];
+		tmp2 += (unsigned long)global_hotness[color];
+	}
+	//variance = (tmp1 - ((tmp2 * tmp2) >> ORDER_OF_NR_COLORS)) >> ORDER_OF_NR_COLORS;
+	variance = (tmp1 - ((tmp2 * tmp2) / NR_NORMAL_COLORS)) / NR_NORMAL_COLORS;
+#ifdef DEBUG_FILE
+	if (fp) {
+		sprintf(buf + strlen(buf), "\n");
+		file_write(fp, buf, strlen(buf), &offset);
+	}
+#endif
+	//cadpm_sort(global_hotness, global_hotness_index, NR_COLORS_IN_CACHE, sizeof(unsigned int), cadpm_compare, cadpm_swap);
+	cadpm_sort(global_hotness, global_hotness_index, NR_NORMAL_COLORS, sizeof(unsigned int), cadpm_compare, cadpm_swap);
+	return variance;
+}
+
+static inline unsigned int need_page_migration(unsigned long variance)
+{
+	//unsigned long deference = (unsigned long)(global_hotness[NR_COLORS_IN_CACHE - 1] - global_hotness[0]);
+	unsigned long deference = (unsigned long)(global_hotness[NR_NORMAL_COLORS - 1] - global_hotness[0]);
+	unsigned long lhs = deference * deference;
+	unsigned long rhs = variance << 2;
+	unsigned int result = (lhs >= rhs)? 1 : 0;	
+#if DEBUG > 1
+	printk("Variance: %lu, Deference: %lu, lhs: %lu, rhs: %lu, Result: %u\n", variance, deference, lhs, rhs, result);
+#endif
+	return result;
+}
+
+static inline unsigned int choose_hot_colors(unsigned int core, unsigned int nr_target_process, unsigned int turn)
+{
+	int i;
+	//unsigned int hot_color;
+	//unsigned int hot_color_idx;
+	//unsigned int nr_hot_colors = 0;
+	for (i = 0; i < NR_VICTIM_COLORS; i++) {
+		//hot_colors[i] = global_hotness_index[NR_COLORS_IN_CACHE - 1 - i];
+		hot_colors[i] = global_hotness_index[NR_NORMAL_COLORS - 1 - i];
+#if 0
+		hot_colors[i] = NO_COLOR;
+		hot_color_idx = NR_COLORS_IN_CACHE - 1 - i;
+		hot_color = global_hotness_index[hot_color_idx];
+//		if ((local_hotness[core][hot_color] * nr_target_process) >= global_hotness[hot_color_idx]) {
+			hot_colors[nr_hot_colors] = hot_color;
+			nr_hot_colors++;
+//		}
+#endif
+	}
+#if DEBUG > 0
+	for (i = 0; i < NR_VICTIM_COLORS; i++) {
+		printk("choose_hot_colors: [Turn %u]hot_colors[%d] = %u\n", turn, i, hot_colors[i]);
+	}
+#endif
+	//return nr_hot_colors;
+	return NR_VICTIM_COLORS;
+}
+
+static inline void choose_cold_colors(unsigned int core, unsigned int nr_hot_colors, unsigned int turn)
+{
+	int i;
+	for (i = 0; i < nr_hot_colors; i++) {
+		cold_colors[i] = global_hotness_index[i];
+#if DEBUG > 0
+		printk("choose_cold_colors: [Turn %u]cold_colors[%d] = %u\n", turn, i, cold_colors[i]);
+#endif
+	}
+}
+
+static inline pte_t* get_pte_from_vpa(struct mm_struct *target_mm, unsigned long target_address)
+{
+	struct mm_struct *mm = target_mm;
+	unsigned long address = target_address;
+    pgd_t *pgd;
+    pud_t *pud;
+    pmd_t *pmd;
+
+	pgd = pgd_offset(mm, address);
+	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
+		return NULL;
+	pud = pud_offset(pgd, address);
+	if (pud_none(*pud) || unlikely(pud_bad(*pud)))
+		return NULL;
+	pmd = pmd_offset(pud, address);
+	if (pmd_none(*pmd) || unlikely(pmd_bad(*pmd)))
+		return NULL;
+	return pte_offset_map(pmd, address);
+}
+
+static inline pte_t* get_pte_from_vpa_lock(struct mm_struct *target_mm, unsigned long target_address, spinlock_t **ptl)
+{
+	struct mm_struct *mm = target_mm;
+	unsigned long address = target_address;
+    pgd_t *pgd;
+    pud_t *pud;
+    pmd_t *pmd;
+
+	pgd = pgd_offset(mm, address);
+	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
+		return NULL;
+	pud = pud_offset(pgd, address);
+	if (pud_none(*pud) || unlikely(pud_bad(*pud)))
+		return NULL;
+	pmd = pmd_offset(pud, address);
+	if (pmd_none(*pmd) || unlikely(pmd_bad(*pmd)))
+		return NULL;
+	return pte_offset_map_lock(mm, pmd, address, ptl);
+}
+
+static inline int is_color_hot(unsigned int color)
+{
+	int i;
+	for (i = 0; i < NR_VICTIM_COLORS; i++) {
+		if (hot_colors[i] == color) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static inline int is_pollute_color(unsigned int color)
+{
+	return (color == POLLUTE_COLOR)? 1 : 0;
+}
+
+static inline unsigned int calculate_local_average_hotness(unsigned int cpu)
+{
+	int color;
+	unsigned int sum = 0;
+	//for (color = 0; color < NR_COLORS_IN_CACHE; color++) {
+	for (color = 0; color < NR_NORMAL_COLORS; color++) {
+		sum += local_hotness[cpu][color];
+	}
+	//return (sum >> ORDER_OF_NR_COLORS);
+	return (sum / NR_NORMAL_COLORS);
+}
+
+static inline unsigned int cadpm_page_migration(struct task_struct *tsk, unsigned int cpu, unsigned int nr_victim_colors)
+{
+	unsigned long target_address;
+	struct mm_struct *mm = get_task_mm(tsk);
+	struct vm_area_struct *vma = mm->mmap->vm_next; //skip code area
+    pte_t *ptep;
+	pte_t pte;
+	spinlock_t *ptl;
+	unsigned int nr_migrated_pages = 0;
+	unsigned int nr_became_hot_pages = 0;
+	unsigned int nr_new_pollute_pages = 0;
+	int cold_high_watermark[nr_victim_colors];
+	unsigned int i;
+	unsigned int local_average_hotness = calculate_local_average_hotness(cpu);
+	memset(cold_high_watermark, 0, nr_victim_colors * sizeof(cold_high_watermark[0]));
+#if DEBUG > 0
+		printk("cadpm_page_migration: local_average_hotness for cpu %u = %u\n", cpu, local_average_hotness);
+#endif
+
+	for (i = 0; i < nr_victim_colors; i++) {
+		//cold_high_watermark[i] = local_hotness[cpu][hot_colors[i]] - local_average_hotness;
+		cold_high_watermark[i] = local_average_hotness - local_hotness[cpu][cold_colors[i]];
+#if DEBUG > 0
+		printk("initial cold_high_watermark[color %u] = %d\n", cold_colors[i], cold_high_watermark[i]);
+#endif
+	}
+
+	while (vma != NULL) {
+		for (target_address = vma->vm_start; target_address < vma->vm_end; target_address+=PAGE_SIZE) {
+			ptep = get_pte_from_vpa_lock(mm, target_address, &ptl);
+			if (ptep == NULL) {
+				break;
+			}
+			pte = *ptep;
+			if (pte_present(pte)){
+				unsigned long pfn = pte_pfn(pte);
+				unsigned int color = cadpm_get_color(pfn);
+				int cold_color_idx = is_color_hot(color);
+				unsigned int access_cnt = pte_get_access_cnt(pte);
+				int expected_migration_effect = ((access_cnt * (access_cnt + 1)) >> 1) + (access_cnt * (NR_ACCESS_HISTORY_LOCAL - access_cnt));
+				pte_unmap_unlock(ptep, ptl);
+				if (is_pollute_color(color)) {
+					if (access_cnt > 15) {
+						cold_color_idx = nr_became_hot_pages & (nr_victim_colors - 1);
+						if (cadpm_do_migrate_page(pfn, cold_colors[cold_color_idx]) == 0) {
+							cold_high_watermark[cold_color_idx] -= expected_migration_effect;
+							nr_became_hot_pages++;
+						}
+					}
+				} else if (cold_color_idx >= 0) {
+					if (access_cnt > 31) {
+						if ((cold_high_watermark[cold_color_idx] - expected_migration_effect) > 0) {
+							if (cadpm_do_migrate_page(pfn, cold_colors[cold_color_idx]) == 0) {
+#if DEBUG > 1
+								printk("[cadpm_page_migration] For %s, a page(pfn:%lu, color:%u) is migrated to a page(color:%u)\n", tsk->comm, pfn, color, cold_colors[cold_color_idx]);
+#endif
+								cold_high_watermark[cold_color_idx] -= expected_migration_effect;
+#if DEBUG > 0
+								printk("cold_high_watermark[color %u] = %d\n", cold_colors[cold_color_idx], cold_high_watermark[cold_color_idx]);
+#endif
+								nr_migrated_pages++;
+							} else {
+#if DEBUG > 1
+								printk("cadpm_page_migration: failed to migrate a page(pfn=%lu)\n", pfn);
+#endif
+							}
+						}
+					} else if (access_cnt < 8 && access_cnt > 0) {
+						if (cadpm_do_migrate_page(pfn, POLLUTE_COLOR) == 0) {
+							nr_new_pollute_pages++;
+						}
+					}
+				}	
+			} else {
+				pte_unmap_unlock(ptep, ptl);
+			}
+		}
+		vma = vma->vm_next;
+	}
+#if DEBUG > 0
+	printk("nr_became_hot_pages: %u, nr_new_pollute_pages: %u, nr_migrated_pages: %u\n", nr_became_hot_pages, nr_new_pollute_pages, nr_migrated_pages);
+#endif
+    return nr_migrated_pages;
+}
+
+static inline int cadpm_prepare_scan(struct mm_struct *mm)
+{
+	unsigned long target_address;
+	struct vm_area_struct *vma = mm->mmap->vm_next; //skip code area
+    pte_t *ptep;
+	pte_t pte;
+	spinlock_t *ptl;
+	while (vma != NULL) {
+		for (target_address = vma->vm_start; target_address < vma->vm_end; target_address+=PAGE_SIZE) {
+			ptep = get_pte_from_vpa_lock(mm, target_address, &ptl);
+			if (ptep == NULL) {
+				break;
+			}
+			pte = *ptep;
+			if (pte_present(pte)){
+				if (pte_young(pte)) {
+					pte = pte_mkold(pte);
+					set_pte(ptep, pte);
+				}
+			}
+			pte_unmap_unlock(ptep, ptl);
+		}
+		vma = vma -> vm_next;
+	}
+    return 0;
+}
+
+int cadpm_page_table_scan(void *args)
+{
+	struct cadpm_worker_args *data = args;
+	unsigned long target_address;
+	unsigned int cur_turn;
+	struct task_struct *tsk;
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+	pte_t *ptep;
+	pte_t pte;
+	spinlock_t *ptl;
+	unsigned int start_flag;
+	wait_queue_head_t wq;
+
+#ifdef DEBUG_TIME
+	signed long long start_time, end_time;
+#endif
+
+	//init data
+	init_waitqueue_head(&wq);
+	data->worker_wq = &wq;
+
+	start_flag = 0;
+	data->start_flag = &start_flag;
+
+	atomic_dec(&data->sd->thread_count);
+	wake_up_interruptible(&data->sd->manager_wq);
+	// i'm ready
+
+	while(!kthread_should_stop()) {
+		if(wait_event_interruptible_timeout(wq, (start_flag == 1), 5 * HZ) == 0) {// wait here until all other threads are ready
+			printk("cadpm_page_table_scan: timeout on core %d\n", smp_processor_id());
+			goto preparation_for_exit;
+		}
+		start_flag = 0;
+		cur_turn = data->sd->cur_turn;
+
+		tsk = data->target_tsk;
+		mm = get_task_mm(tsk);
+
+		if (!mm) {// if kernel thread
+			start_flag = 2;
+			goto no_mm_struct;
+		}
+
+
+#ifdef DEBUG_TIME
+		if (cur_turn < DEBUG_DURATION) {
+			start_time = get_time();
+		}
+#endif
+
+		cadpm_prepare_scan(mm);
+
+#ifdef DEBUG_TIME
+		if (cur_turn < DEBUG_DURATION) {
+			end_time = get_time();
+			printk("%s[%u]: cadpm_prepare_scan()'s running time: %lld\n", tsk->comm, cur_turn, end_time - start_time);
+		}
+#endif
+		usleep_range(SCAN_TIME_WINDOW_US, SCAN_TIME_WINDOW_US);
+
+#ifdef DEBUG_TIME
+		if (cur_turn < DEBUG_DURATION) {
+			start_time = get_time();
+		}
+#endif
+		vma = mm->mmap->vm_next; //skip code area
+		// current_history reset
+		if (mm->access_history) {
+			cadpm_clear_access_history(mm);
+		}
+		while (vma != NULL) {
+			for (target_address = vma->vm_start; target_address < vma->vm_end; target_address+=PAGE_SIZE) {
+				ptep = get_pte_from_vpa_lock(mm, target_address, &ptl);
+				if (ptep == NULL) {
+					break;
+				}
+				pte = *ptep;
+				if (pte_present(pte)) {
+					if (unlikely(need_decay)) {
+#if DEBUG > 1
+						if (cur_turn == (128))
+							printk("cadpm_decay: Address(%lx)'s pte access count = [before] %d,", target_address, pte_get_access_cnt(*ptep));
+#endif
+						if (pte_get_access_cnt(pte)) {
+							pte = pte_decay_access_cnt(pte);
+							set_pte(ptep, pte);
+						}
+#if DEBUG > 1
+						if (cur_turn == (128))
+							printk("        [after] %d\n", pte_get_access_cnt(*ptep));
+#endif
+					}
+					if (pte_young(pte)){
+						pte = pte_increase_access_cnt(pte);
+						if (mm->access_history) {
+							cadpm_record_access_history(mm, pte_pfn(pte));
+						}
+
+						set_pte(ptep, pte);
+					}
+				}
+				pte_unmap_unlock(ptep, ptl);
+			}
+			vma = vma -> vm_next;
+		}
+		if (mm->access_history) {
+#if DEBUG > 1
+			if (cur_turn < DEBUG_DURATION) {
+				int i;
+				for (i = 0; i < NR_COLORS_IN_CACHE; i++) {
+					printk("%s[%u]'s access_cnt[%d]: %u\n", tsk->comm, cur_turn, i, (unsigned char)mm->access_history[i * NR_ACCESS_HISTORY_LOCAL + mm->cur_history_idx]);
+				}
+			}
+#endif
+			mm->cur_history_idx = (mm->cur_history_idx == NR_ACCESS_HISTORY_LOCAL - 1)? 0 : mm->cur_history_idx + 1;
+		}
+
+#ifdef DEBUG_TIME
+		if (cur_turn < DEBUG_DURATION) {
+			end_time = get_time();
+			printk("%s[%u]: cadpm_page_table_scan()'s running time: %lld\n", tsk->comm, cur_turn, end_time - start_time);
+		}
+#endif
+		mmput(mm);
+
+no_mm_struct:
+		atomic_dec(&data->sd->thread_count);
+		wake_up_interruptible(&data->sd->manager_wq);
+	}
+
+preparation_for_exit:
+	data->worker_wq = NULL;
+	data->start_flag = NULL;
+	return 0;
+}
+
+int cadpm_manager_thread(void *args) 
+{
+	unsigned int i;
+#if DEBUG > 1
+	int k;
+#endif
+	int turn_reset_flag = 0;
+	struct cadpm_shared_data sd;
+	struct cadpm_worker_args data[NR_CORES_PER_NODE];
+	struct task_struct *worker[NR_CORES_PER_NODE];
+	unsigned int core_id[NR_CORES_PER_NODE];
+	unsigned int decision_turn = INIT_DECISION_TURN;
+	unsigned int nr_target_process;
+#ifdef DEBUG_TIME
+	signed long long start_time = 0;
+	signed long long end_time = 0;
+#endif
+	printk("[DCSLAB]cadpm_manager_thread start\n");
+	cadpm_init_worker_args(data, &sd);
+	for (i = 0; i < NR_CORES_PER_NODE; i++) {
+		core_id[i] = 3 + (i * NR_NODES_IN_SYSTEM);
+	}
+	
+	//create worker threads for each core
+	atomic_set(&sd.thread_count, NR_CORES_PER_NODE);
+	for (i = 0; i < NR_CORES_PER_NODE; i++) {
+		worker[i] = kthread_create(cadpm_page_table_scan, &data[i], "cadpm_worker[%d]", core_id[i]);
+		if (!IS_ERR(worker[i])) {
+			kthread_bind(worker[i], core_id[i]);
+			wake_up_process(worker[i]);
+		} else {
+			atomic_dec(&sd.thread_count);
+		}
+	}
+	wait_event_interruptible(sd.manager_wq, (atomic_read(&sd.thread_count) == 0));
+
+	// complete creating workers waiting for signal
+
+	while(!kthread_should_stop()) {
+		atomic_set(&sd.thread_count, NR_CORES_PER_NODE);
+		for (i = 0; i < NR_CORES_PER_NODE; i++) {
+			if (data[i].start_flag && data[i].worker_wq) {
+				data[i].target_tsk = get_rq_task(core_id[i]);
+#if DEBUG > 1
+				if (!data[i].target_tsk) {
+					printk("cadpm_manager: get_rq_task(core_id[%d] failed\n", i);
+				}
+#endif
+				get_task_struct(data[i].target_tsk);
+				if (data[i].start_flag)
+					*data[i].start_flag = 1;
+				wake_up_interruptible(data[i].worker_wq);
+			} else {
+				printk("cadpm_manager_thread: one of workers[%u] might have stopped\n", core_id[i]);
+				for (i = i - 1; i >= 0; i--) {
+					put_task_struct(data[i].target_tsk); // roll back
+				}
+				goto preparation_for_exit;
+			}
+		}
+		if (wait_event_interruptible_timeout(sd.manager_wq, (atomic_read(&sd.thread_count) == 0), 2 * HZ) == 0) {
+			printk("cadpm_manager_thread: some of workers do not answer\n");
+			goto preparation_for_exit;
+		}
+
+		// calculate hotness
+#ifdef DEBUG_TIME
+		if (sd.cur_turn < DEBUG_DURATION) {
+			start_time = get_time();
+		}
+#endif
+		need_decay = 0;
+		nr_target_process = 0;
+
+		if (sd.cur_turn == decision_turn) {
+			unsigned long variance = 0;
+			need_decay = 1;
+			memset(local_hotness, 0, NR_CORES_PER_NODE * NR_COLORS_IN_CACHE * sizeof(local_hotness[0][0]));
+			memset(global_hotness, 0, NR_COLORS_IN_CACHE * sizeof(global_hotness[0]));
+			cadpm_init_global_hotness_index();
+			for (i = 0; i < NR_CORES_PER_NODE; i++) {
+				if (cadpm_calculate_local_hotness(data[i].target_tsk, i)) {
+#if DEBUG > 1
+					printk("[core %d]calculate local hotness for %s[%u]\n", i, data[i].target_tsk->comm, sd.cur_turn);
+#endif
+					nr_target_process++;	
+				}
+			}
+#ifdef DEBUG_TIME
+			if (sd.cur_turn < DEBUG_DURATION) {
+				end_time = get_time();
+				printk("[%u]: cadpm_calculate_local_hotness()'s running time: %lld\n", sd.cur_turn, end_time - start_time);
+			}
+#endif
+			// Calculate local hotness in each core & save them separately
+#if DEBUG > 1
+			//if (sd.cur_turn == 127) {
+				for (k = 0; k < NR_COLORS_IN_CACHE; k++) {
+					printk("Core3: (index: %u, hotness: %u)\n", k, local_hotness[0][k]);
+				}
+			//}
+#endif
+
+			if (nr_target_process) {
+#ifdef DEBUG_TIME
+				if (sd.cur_turn < DEBUG_DURATION) {
+					start_time = get_time();
+				}
+#endif
+#ifdef DEBUG_FILE
+				if (fp) {
+					memset(buf, 0, sizeof(buf));
+					sprintf(buf, "%s,%u,", data[0].target_tsk->comm, sd.cur_turn);
+				}
+#endif
+				
+				variance = cadpm_calculate_global_hotness();
+				
+
+
+#ifdef DEBUG_TIME
+				if (sd.cur_turn < DEBUG_DURATION) {
+					end_time = get_time();
+					printk("[%u]: cadpm_calculate_global_hotness()'s running time: %lld\n", sd.cur_turn, end_time - start_time);
+				}
+#endif
+#if DEBUG > 1
+				//if (sd.cur_turn == 127) {
+					for (k = 0; k < NR_COLORS_IN_CACHE; k++) {
+						printk("Sorted Hotness[%u]: (index: %u, hotness: %u)\n", k, global_hotness_index[k], global_hotness[k]);
+					}
+				//}
+#endif
+				if (need_page_migration(variance)) { // Imbalance check
+					struct task_struct *tsk;
+					for (i = 0; i < NR_CORES_PER_NODE; i++) {
+						unsigned int nr_hot_colors;
+						tsk = data[i].target_tsk;
+						if (!tsk->mm) {
+							continue;
+						}
+						if ((nr_hot_colors = choose_hot_colors(i, nr_target_process, sd.cur_turn)) > 0) {
+							unsigned int nr_migrated_pages;
+							choose_cold_colors(i, nr_hot_colors, sd.cur_turn);
+#ifdef DEBUG_TIME
+							if (sd.cur_turn < DEBUG_DURATION) {
+								start_time = get_time();
+							}
+#endif
+							nr_migrated_pages = cadpm_page_migration(tsk, i, nr_hot_colors);
+#ifdef DEBUG_TIME
+							if (sd.cur_turn < DEBUG_DURATION) {
+								end_time = get_time();
+								printk("%s[%u]: cadpm_page_migration()'s running time: %lld\n", tsk->comm, sd.cur_turn, end_time - start_time);
+							}
+#endif
+#if DEBUG > 0
+							printk("[cadpm_page_migration] For %s, %u pages are migrated\n", tsk->comm, nr_migrated_pages); 
+#endif
+						}
+					}
+				} else {
+#if DEBUG > 0
+					printk("cadpm: no need to migrate pages; it is in balanced state\n");
+#endif
+				}
+			}
+
+			decision_turn += NEXT_DECISION_TURN;
+		}
+
+
+
+
+
+
+
+		for (i = 0; i < NR_CORES_PER_NODE; i++) {
+			put_task_struct(data[i].target_tsk);
+		}
+
+		turn_reset_flag = 1;
+		for (i = 0; i < NR_CORES_PER_NODE; i++) {
+			if (*data[i].start_flag == 0) {
+				turn_reset_flag = 0;
+			}
+		}
+
+		if (turn_reset_flag) {
+			sd.cur_turn = 0;
+			decision_turn = INIT_DECISION_TURN;
+		} else {
+			sd.cur_turn++;
+		}
+
+		msleep(SCAN_FREQUENCY_MS);
+	}
+
+preparation_for_exit:
+	// need to handle put_task_struct
+
+	for (i = 0; i < NR_CORES_PER_NODE; i++) {
+		if (data[i].worker_wq)
+			if (worker[i])
+				kthread_stop(worker[i]);
+	}
+	printk("[DCSLAB]cadpm_manager_thread end\n");
+	return 0;
+}
+
+static int scan_init(void)
+{
+#ifdef DEBUG_FILE
+	if (output == NULL) {
+		sprintf(buf, "result.csv");
+	} else {
+		sprintf(buf, output);
+	}
+	if (!(fp = file_open(buf, O_WRONLY|O_CREAT, 0644))) {
+		printk("cadpm_scan_init: fd open failed\n");
+		return 0;
+	} else {
+		int i;
+		sprintf(buf, "Name,Turn,");
+		for (i = 0; i < NR_COLORS_IN_CACHE; i++) {
+			sprintf(buf + strlen(buf), "%d,",i);
+		}
+		sprintf(buf + strlen(buf), "\n");
+		file_write(fp, buf, strlen(buf), &offset);
+	}
+#endif
+	printk(KERN_ALERT "[DCSLAB]cadpm start\n");
+	cadpm_manager = kthread_create(cadpm_manager_thread, NULL, "cadpm_manager");
+	if (!IS_ERR(cadpm_manager)) {
+		kthread_bind(cadpm_manager, 30);
+		wake_up_process(cadpm_manager);
+	}
+	_cadpm_create_access_history = cadpm_create_access_history;
+#ifdef CONFIG_FLATMEM
+	printk("CONFIG_FLATMEM\n");
+#endif
+	return 0;
+}
+
+static void scan_exit(void)
+{
+#ifdef DEBUG_FILE
+	if (fp) {
+		file_close(fp);
+	}
+#endif
+	printk(KERN_ALERT "[DCSLAB]cadpm stop\n");
+	if (cadpm_manager)
+		kthread_stop(cadpm_manager);
+	_cadpm_create_access_history = NULL;
+}
+
+module_init(scan_init);
+module_exit(scan_exit);
+MODULE_LICENSE("GPL");
