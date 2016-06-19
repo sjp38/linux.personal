@@ -162,8 +162,8 @@ void __weak arch_release_thread_info(struct thread_info *ti)
 static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
 						  int node)
 {
-	struct page *page = alloc_kmem_pages_node(node, THREADINFO_GFP,
-						  THREAD_SIZE_ORDER);
+	struct page *page = alloc_pages_node(node, THREADINFO_GFP,
+					     THREAD_SIZE_ORDER);
 
 	if (page)
 		memcg_kmem_update_page_stat(page, MEMCG_KERNEL_STACK,
@@ -178,7 +178,7 @@ static inline void free_thread_info(struct thread_info *ti)
 
 	memcg_kmem_update_page_stat(page, MEMCG_KERNEL_STACK,
 				    -(1 << THREAD_SIZE_ORDER));
-	__free_kmem_pages(page, THREAD_SIZE_ORDER);
+	__free_pages(page, THREAD_SIZE_ORDER);
 }
 # else
 static struct kmem_cache *thread_info_cache;
@@ -907,6 +907,12 @@ void mm_release(struct task_struct *tsk, struct mm_struct *mm)
 #endif
 	if (unlikely(!list_empty(&tsk->pi_state_list)))
 		exit_pi_state_list(tsk);
+
+	/* Must be last as the other cleanups might deref it */
+	if (unlikely(tsk->futex_cache)) {
+		exit_futex_task_cache(tsk);
+		tsk->futex_cache = NULL;
+	}
 #endif
 
 	uprobe_free_utask(tsk);
@@ -1517,6 +1523,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 #endif
 	INIT_LIST_HEAD(&p->pi_state_list);
 	p->pi_state_cache = NULL;
+	p->futex_cache = NULL;
 #endif
 	/*
 	 * sigaltstack should be cleared when sharing the same VM

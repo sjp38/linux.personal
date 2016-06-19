@@ -10,6 +10,7 @@
 #include <asm/fpu/regset.h>
 
 #include <asm/sigframe.h>
+#include <asm/trace/fpu.h>
 
 static struct _fpx_sw_bytes fx_sw_reserved, fx_sw_reserved_ia32;
 
@@ -156,8 +157,8 @@ int copy_fpstate_to_sigframe(void __user *buf, void __user *buf_fx, int size)
 	struct task_struct *tsk = current;
 	int ia32_fxstate = (buf != buf_fx);
 
-	ia32_fxstate &= (config_enabled(CONFIG_X86_32) ||
-			 config_enabled(CONFIG_IA32_EMULATION));
+	ia32_fxstate &= (IS_ENABLED(CONFIG_X86_32) ||
+			 IS_ENABLED(CONFIG_IA32_EMULATION));
 
 	if (!access_ok(VERIFY_WRITE, buf, size))
 		return -EACCES;
@@ -254,8 +255,8 @@ static int __fpu__restore_sig(void __user *buf, void __user *buf_fx, int size)
 	u64 xfeatures = 0;
 	int fx_only = 0;
 
-	ia32_fxstate &= (config_enabled(CONFIG_X86_32) ||
-			 config_enabled(CONFIG_IA32_EMULATION));
+	ia32_fxstate &= (IS_ENABLED(CONFIG_X86_32) ||
+			 IS_ENABLED(CONFIG_IA32_EMULATION));
 
 	if (!buf) {
 		fpu__clear(fpu);
@@ -282,6 +283,7 @@ static int __fpu__restore_sig(void __user *buf, void __user *buf_fx, int size)
 			 */
 			state_size = sizeof(struct fxregs_state);
 			fx_only = 1;
+			trace_x86_fpu_xstate_check_failed(fpu);
 		} else {
 			state_size = fx_sw_user.xstate_size;
 			xfeatures = fx_sw_user.xfeatures;
@@ -311,6 +313,7 @@ static int __fpu__restore_sig(void __user *buf, void __user *buf_fx, int size)
 		if (__copy_from_user(&fpu->state.xsave, buf_fx, state_size) ||
 		    __copy_from_user(&env, buf, sizeof(env))) {
 			fpstate_init(&fpu->state);
+			trace_x86_fpu_init_state(fpu);
 			err = -1;
 		} else {
 			sanitize_restored_xstate(tsk, &env, xfeatures, fx_only);
@@ -392,8 +395,8 @@ void fpu__init_prepare_fx_sw_frame(void)
 	fx_sw_reserved.xfeatures = xfeatures_mask;
 	fx_sw_reserved.xstate_size = xstate_size;
 
-	if (config_enabled(CONFIG_IA32_EMULATION) ||
-	    config_enabled(CONFIG_X86_32)) {
+	if (IS_ENABLED(CONFIG_IA32_EMULATION) ||
+	    IS_ENABLED(CONFIG_X86_32)) {
 		int fsave_header_size = sizeof(struct fregs_state);
 
 		fx_sw_reserved_ia32 = fx_sw_reserved;

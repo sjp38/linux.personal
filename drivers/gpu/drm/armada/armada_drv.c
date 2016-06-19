@@ -197,7 +197,7 @@ static struct drm_driver armada_drm_driver = {
 	.debugfs_init		= armada_drm_debugfs_init,
 	.debugfs_cleanup	= armada_drm_debugfs_cleanup,
 #endif
-	.gem_free_object	= armada_gem_free_object,
+	.gem_free_object_unlocked = armada_gem_free_object,
 	.prime_handle_to_fd	= drm_gem_prime_handle_to_fd,
 	.prime_fd_to_handle	= drm_gem_prime_fd_to_handle,
 	.gem_prime_export	= armada_gem_prime_export,
@@ -232,6 +232,11 @@ static int compare_of(struct device *dev, void *data)
 	return dev->of_node == data;
 }
 
+static void release_of(struct device *dev, void *data)
+{
+	of_node_put(data);
+}
+
 static int compare_dev_name(struct device *dev, void *data)
 {
 	const char *name = data;
@@ -255,8 +260,8 @@ static void armada_add_endpoints(struct device *dev,
 			continue;
 		}
 
-		component_match_add(dev, match, compare_of, remote);
-		of_node_put(remote);
+		component_match_add_release(dev, match, release_of,
+					    compare_of, remote);
 	}
 }
 

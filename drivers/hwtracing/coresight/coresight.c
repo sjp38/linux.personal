@@ -385,7 +385,6 @@ static int _coresight_build_path(struct coresight_device *csdev,
 	int i;
 	bool found = false;
 	struct coresight_node *node;
-	struct coresight_connection *conn;
 
 	/* An activated sink has been found.  Enqueue the element */
 	if ((csdev->type == CORESIGHT_DEV_TYPE_SINK ||
@@ -394,8 +393,9 @@ static int _coresight_build_path(struct coresight_device *csdev,
 
 	/* Not a sink - recursively explore each port found on this element */
 	for (i = 0; i < csdev->nr_outport; i++) {
-		conn = &csdev->conns[i];
-		if (_coresight_build_path(conn->child_dev, path) == 0) {
+		struct coresight_device *child_dev = csdev->conns[i].child_dev;
+
+		if (child_dev && _coresight_build_path(child_dev, path) == 0) {
 			found = true;
 			break;
 		}
@@ -425,6 +425,7 @@ out:
 struct list_head *coresight_build_path(struct coresight_device *csdev)
 {
 	struct list_head *path;
+	int rc;
 
 	path = kzalloc(sizeof(struct list_head), GFP_KERNEL);
 	if (!path)
@@ -432,9 +433,10 @@ struct list_head *coresight_build_path(struct coresight_device *csdev)
 
 	INIT_LIST_HEAD(path);
 
-	if (_coresight_build_path(csdev, path)) {
+	rc = _coresight_build_path(csdev, path);
+	if (rc) {
 		kfree(path);
-		path = NULL;
+		return ERR_PTR(rc);
 	}
 
 	return path;
@@ -507,8 +509,9 @@ int coresight_enable(struct coresight_device *csdev)
 		goto out;
 
 	path = coresight_build_path(csdev);
-	if (!path) {
+	if (IS_ERR(path)) {
 		pr_err("building path(s) failed\n");
+		ret = PTR_ERR(path);
 		goto out;
 	}
 
@@ -722,7 +725,8 @@ static int coresight_orphan_match(struct device *dev, void *data)
 		/* We have found at least one orphan connection */
 		if (conn->child_dev == NULL) {
 			/* Does it match this newly added device? */
-			if (!strcmp(dev_name(&csdev->dev), conn->child_name)) {
+			if (conn->child_name &&
+			    !strcmp(dev_name(&csdev->dev), conn->child_name)) {
 				conn->child_dev = csdev;
 			} else {
 				/* This component still has an orphan */

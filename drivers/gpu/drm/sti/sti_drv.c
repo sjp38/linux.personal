@@ -72,11 +72,6 @@ static int sti_drm_fps_dbg_show(struct seq_file *s, void *data)
 	struct drm_info_node *node = s->private;
 	struct drm_device *dev = node->minor->dev;
 	struct drm_plane *p;
-	int ret;
-
-	ret = mutex_lock_interruptible(&dev->struct_mutex);
-	if (ret)
-		return ret;
 
 	list_for_each_entry(p, &dev->mode_config.plane_list, head) {
 		struct sti_plane *plane = to_sti_plane(p);
@@ -86,7 +81,6 @@ static int sti_drm_fps_dbg_show(struct seq_file *s, void *data)
 			   plane->fps_info.fips_str);
 	}
 
-	mutex_unlock(&dev->struct_mutex);
 	return 0;
 }
 
@@ -221,7 +215,7 @@ static int sti_atomic_commit(struct drm_device *drm,
 	 * the software side now.
 	 */
 
-	drm_atomic_helper_swap_state(drm, state);
+	drm_atomic_helper_swap_state(state, true);
 
 	if (nonblock)
 		sti_atomic_schedule(private, state);
@@ -310,7 +304,7 @@ static struct drm_driver sti_driver = {
 	.driver_features = DRIVER_HAVE_IRQ | DRIVER_MODESET |
 	    DRIVER_GEM | DRIVER_PRIME | DRIVER_ATOMIC,
 	.load = sti_load,
-	.gem_free_object = drm_gem_cma_free_object,
+	.gem_free_object_unlocked = drm_gem_cma_free_object,
 	.gem_vm_ops = &drm_gem_cma_vm_ops,
 	.dumb_create = drm_gem_cma_dumb_create,
 	.dumb_map_offset = drm_gem_cma_dumb_map_offset,
@@ -346,6 +340,11 @@ static int compare_of(struct device *dev, void *data)
 	return dev->of_node == data;
 }
 
+static void release_of(struct device *dev, void *data)
+{
+	of_node_put(data);
+}
+
 static int sti_bind(struct device *dev)
 {
 	return drm_platform_init(&sti_driver, to_platform_device(dev));
@@ -375,8 +374,8 @@ static int sti_platform_probe(struct platform_device *pdev)
 	child_np = of_get_next_available_child(node, NULL);
 
 	while (child_np) {
-		component_match_add(dev, &match, compare_of, child_np);
-		of_node_put(child_np);
+		component_match_add_release(dev, &match, release_of,
+					    compare_of, child_np);
 		child_np = of_get_next_available_child(node, child_np);
 	}
 

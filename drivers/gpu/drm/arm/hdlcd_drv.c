@@ -106,17 +106,11 @@ static void hdlcd_fb_output_poll_changed(struct drm_device *drm)
 		drm_fbdev_cma_hotplug_event(hdlcd->fbdev);
 }
 
-static int hdlcd_atomic_commit(struct drm_device *dev,
-			       struct drm_atomic_state *state, bool nonblock)
-{
-	return drm_atomic_helper_commit(dev, state, false);
-}
-
 static const struct drm_mode_config_funcs hdlcd_mode_config_funcs = {
 	.fb_create = drm_fb_cma_create,
 	.output_poll_changed = hdlcd_fb_output_poll_changed,
 	.atomic_check = drm_atomic_helper_check,
-	.atomic_commit = hdlcd_atomic_commit,
+	.atomic_commit = drm_atomic_helper_commit,
 };
 
 static void hdlcd_setup_mode_config(struct drm_device *drm)
@@ -296,7 +290,7 @@ static struct drm_driver hdlcd_driver = {
 	.get_vblank_counter = drm_vblank_no_hw_counter,
 	.enable_vblank = hdlcd_enable_vblank,
 	.disable_vblank = hdlcd_disable_vblank,
-	.gem_free_object = drm_gem_cma_free_object,
+	.gem_free_object_unlocked = drm_gem_cma_free_object,
 	.gem_vm_ops = &drm_gem_cma_vm_ops,
 	.dumb_create = drm_gem_cma_dumb_create,
 	.dumb_map_offset = drm_gem_cma_dumb_map_offset,
@@ -429,9 +423,14 @@ static const struct component_master_ops hdlcd_master_ops = {
 	.unbind		= hdlcd_drm_unbind,
 };
 
-static int compare_dev(struct device *dev, void *data)
+static int compare_of(struct device *dev, void *data)
 {
 	return dev->of_node == data;
+}
+
+static void release_of(struct device *dev, void *data)
+{
+	of_node_put(data);
 }
 
 static int hdlcd_probe(struct platform_device *pdev)
@@ -460,7 +459,8 @@ static int hdlcd_probe(struct platform_device *pdev)
 		return -EAGAIN;
 	}
 
-	component_match_add(&pdev->dev, &match, compare_dev, port);
+	component_match_add_release(&pdev->dev, &match, release_of,
+				    compare_of, port);
 
 	return component_master_add_with_match(&pdev->dev, &hdlcd_master_ops,
 					       match);

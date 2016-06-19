@@ -517,6 +517,7 @@ config SRCU
 config TASKS_RCU
 	bool
 	default n
+	depends on !UML
 	select SRCU
 	help
 	  This option enables a task-based RCU implementation that uses
@@ -1784,10 +1785,10 @@ endchoice
 
 config SLAB_FREELIST_RANDOM
 	default n
-	depends on SLAB
+	depends on SLAB || SLUB
 	bool "SLAB freelist randomization"
 	help
-	  Randomizes the freelist order used on creating new SLABs. This
+	  Randomizes the freelist order used on creating new pages. This
 	  security feature reduces the predictability of the kernel slab
 	  allocator against heap overflows.
 
@@ -1903,6 +1904,7 @@ if MODULES
 config MODULE_FORCE_LOAD
 	bool "Forced module loading"
 	default n
+	depends on !MODULE_SIG_FORCE
 	help
 	  Allow loading of modules without version information (ie. modprobe
 	  --force).  Forced module loading sets the 'F' (forced) taint flag and

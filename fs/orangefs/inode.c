@@ -80,7 +80,7 @@ static int orangefs_readpages(struct file *file,
 		if (!add_to_page_cache(page,
 				       mapping,
 				       page->index,
-				       GFP_KERNEL)) {
+				       readahead_gfp_mask(mapping))) {
 			ret = read_one_page(page);
 			gossip_debug(GOSSIP_INODE_DEBUG,
 				"failure adding page to cache, read_one_page returned: %d\n",
@@ -294,7 +294,7 @@ int orangefs_permission(struct inode *inode, int mask)
 }
 
 /* ORANGEDS2 implementation of VFS inode operations for files */
-struct inode_operations orangefs_file_inode_operations = {
+const struct inode_operations orangefs_file_inode_operations = {
 	.get_acl = orangefs_get_acl,
 	.set_acl = orangefs_set_acl,
 	.setattr = orangefs_setattr,

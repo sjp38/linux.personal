@@ -88,6 +88,7 @@
 #define HPTE_R_RPN_SHIFT	12
 #define HPTE_R_RPN		ASM_CONST(0x0ffffffffffff000)
 #define HPTE_R_PP		ASM_CONST(0x0000000000000003)
+#define HPTE_R_PPP		ASM_CONST(0x8000000000000003)
 #define HPTE_R_N		ASM_CONST(0x0000000000000004)
 #define HPTE_R_G		ASM_CONST(0x0000000000000008)
 #define HPTE_R_M		ASM_CONST(0x0000000000000010)
@@ -434,7 +435,7 @@ extern void slb_set_size(u16 size);
  * function.  Used in slb_allocate() and do_stab_bolted.  The function
  * computed is: (protovsid*VSID_MULTIPLIER) % VSID_MODULUS
  *
- *	rt = register continaing the proto-VSID and into which the
+ *	rt = register containing the proto-VSID and into which the
  *		VSID will be stored
  *	rx = scratch register (clobbered)
  *

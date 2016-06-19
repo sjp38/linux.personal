@@ -1127,7 +1127,8 @@ xfs_buf_ioapply_map(
 	int		map,
 	int		*buf_offset,
 	int		*count,
-	int		rw)
+	int		op,
+	int		op_flags)
 {
 	int		page_index;
 	int		total_nr_pages = bp->b_page_count;
@@ -1157,16 +1158,14 @@ xfs_buf_ioapply_map(
 
 next_chunk:
 	atomic_inc(&bp->b_io_remaining);
-	nr_pages = BIO_MAX_SECTORS >> (PAGE_SHIFT - BBSHIFT);
-	if (nr_pages > total_nr_pages)
-		nr_pages = total_nr_pages;
+	nr_pages = min(total_nr_pages, BIO_MAX_PAGES);
 
 	bio = bio_alloc(GFP_NOIO, nr_pages);
 	bio->bi_bdev = bp->b_target->bt_bdev;
 	bio->bi_iter.bi_sector = sector;
 	bio->bi_end_io = xfs_buf_bio_end_io;
 	bio->bi_private = bp;
-
+	bio_set_op_attrs(bio, op, op_flags);
 
 	for (; size && nr_pages; nr_pages--, page_index++) {
 		int	rbytes, nbytes = PAGE_SIZE - offset;
@@ -1190,7 +1189,7 @@ next_chunk:
 			flush_kernel_vmap_range(bp->b_addr,
 						xfs_buf_vmap_len(bp));
 		}
-		submit_bio(rw, bio);
+		submit_bio(bio);
 		if (size)
 			goto next_chunk;
 	} else {
@@ -1210,7 +1209,8 @@ _xfs_buf_ioapply(
 	struct xfs_buf	*bp)
 {
 	struct blk_plug	plug;
-	int		rw;
+	int		op;
+	int		op_flags = 0;
 	int		offset;
 	int		size;
 	int		i;
@@ -1229,14 +1229,13 @@ _xfs_buf_ioapply(
 		bp->b_ioend_wq = bp->b_target->bt_mount->m_buf_workqueue;
 
 	if (bp->b_flags & XBF_WRITE) {
+		op = REQ_OP_WRITE;
 		if (bp->b_flags & XBF_SYNCIO)
-			rw = WRITE_SYNC;
-		else
-			rw = WRITE;
+			op_flags = WRITE_SYNC;
 		if (bp->b_flags & XBF_FUA)
-			rw |= REQ_FUA;
+			op_flags |= REQ_FUA;
 		if (bp->b_flags & XBF_FLUSH)
-			rw |= REQ_FLUSH;
+			op_flags |= REQ_PREFLUSH;
 
 		/*
 		 * Run the write verifier callback function if it exists. If
@@ -1266,13 +1265,14 @@ _xfs_buf_ioapply(
 			}
 		}
 	} else if (bp->b_flags & XBF_READ_AHEAD) {
-		rw = READA;
+		op = REQ_OP_READ;
+		op_flags = REQ_RAHEAD;
 	} else {
-		rw = READ;
+		op = REQ_OP_READ;
 	}
 
 	/* we only use the buffer cache for meta-data */
-	rw |= REQ_META;
+	op_flags |= REQ_META;
 
 	/*
 	 * Walk all the vectors issuing IO on them. Set up the initial offset
@@ -1284,7 +1284,7 @@ _xfs_buf_ioapply(
 	size = BBTOB(bp->b_io_length);
 	blk_start_plug(&plug);
 	for (i = 0; i < bp->b_map_count; i++) {
-		xfs_buf_ioapply_map(bp, i, &offset, &size, rw);
+		xfs_buf_ioapply_map(bp, i, &offset, &size, op, op_flags);
 		if (bp->b_error)
 			break;
 		if (size <= 0)
@@ -1774,18 +1774,33 @@ xfs_buf_cmp(
 	return 0;
 }
 
+/*
+ * submit buffers for write.
+ *
+ * When we have a large buffer list, we do not want to hold all the buffers
+ * locked while we block on the request queue waiting for IO dispatch. To avoid
+ * this problem, we lock and submit buffers in groups of 50, thereby minimising
+ * the lock hold times for lists which may contain thousands of objects.
+ *
+ * To do this, we sort the buffer list before we walk the list to lock and
+ * submit buffers, and we plug and unplug around each group of buffers we
+ * submit.
+ */
 static int
-__xfs_buf_delwri_submit(
+xfs_buf_delwri_submit_buffers(
 	struct list_head	*buffer_list,
-	struct list_head	*io_list,
-	bool			wait)
+	struct list_head	*wait_list)
 {
-	struct blk_plug		plug;
 	struct xfs_buf		*bp, *n;
+	LIST_HEAD		(submit_list);
 	int			pinned = 0;
+	struct blk_plug		plug;
 
+	list_sort(NULL, buffer_list, xfs_buf_cmp);
+
+	blk_start_plug(&plug);
 	list_for_each_entry_safe(bp, n, buffer_list, b_list) {
-		if (!wait) {
+		if (!wait_list) {
 			if (xfs_buf_ispinned(bp)) {
 				pinned++;
 				continue;
@@ -1808,25 +1823,21 @@ __xfs_buf_delwri_submit(
 			continue;
 		}
 
-		list_move_tail(&bp->b_list, io_list);
 		trace_xfs_buf_delwri_split(bp, _RET_IP_);
-	}
-
-	list_sort(NULL, io_list, xfs_buf_cmp);
-
-	blk_start_plug(&plug);
-	list_for_each_entry_safe(bp, n, io_list, b_list) {
-		bp->b_flags &= ~(_XBF_DELWRI_Q | XBF_ASYNC | XBF_WRITE_FAIL);
-		bp->b_flags |= XBF_WRITE | XBF_ASYNC;
 
 		/*
-		 * we do all Io submission async. This means if we need to wait
-		 * for IO completion we need to take an extra reference so the
-		 * buffer is still valid on the other side.
+		 * We do all IO submission async. This means if we need
+		 * to wait for IO completion we need to take an extra
+		 * reference so the buffer is still valid on the other
+		 * side. We need to move the buffer onto the io_list
+		 * at this point so the caller can still access it.
 		 */
-		if (wait)
+		bp->b_flags &= ~(_XBF_DELWRI_Q | XBF_ASYNC | XBF_WRITE_FAIL);
+		bp->b_flags |= XBF_WRITE | XBF_ASYNC;
+		if (wait_list) {
 			xfs_buf_hold(bp);
-		else
+			list_move_tail(&bp->b_list, wait_list);
+		} else
 			list_del_init(&bp->b_list);
 
 		xfs_buf_submit(bp);
@@ -1849,8 +1860,7 @@ int
 xfs_buf_delwri_submit_nowait(
 	struct list_head	*buffer_list)
 {
-	LIST_HEAD		(io_list);
-	return __xfs_buf_delwri_submit(buffer_list, &io_list, false);
+	return xfs_buf_delwri_submit_buffers(buffer_list, NULL);
 }
 
 /*
@@ -1865,15 +1875,15 @@ int
 xfs_buf_delwri_submit(
 	struct list_head	*buffer_list)
 {
-	LIST_HEAD		(io_list);
+	LIST_HEAD		(wait_list);
 	int			error = 0, error2;
 	struct xfs_buf		*bp;
 
-	__xfs_buf_delwri_submit(buffer_list, &io_list, true);
+	xfs_buf_delwri_submit_buffers(buffer_list, &wait_list);
 
 	/* Wait for IO to complete. */
-	while (!list_empty(&io_list)) {
-		bp = list_first_entry(&io_list, struct xfs_buf, b_list);
+	while (!list_empty(&wait_list)) {
+		bp = list_first_entry(&wait_list, struct xfs_buf, b_list);
 
 		list_del_init(&bp->b_list);
 
