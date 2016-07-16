@@ -437,24 +437,7 @@ static int vrf_rt6_create(struct net_device *dev)
 	dst_hold(&rt6->dst);
 
 	rt6->rt6i_table = rt6i_table;
-	rt6->dst.output	= vrf_output6;
-
-	/* create a dst for local routing - packets sent locally
-	 * to local address via the VRF device as a loopback
-	 */
-	rt6_local = ip6_dst_alloc(net, dev, flags);
-	if (!rt6_local) {
-		dst_release(&rt6->dst);
-		goto out;
-	}
-
-	dst_hold(&rt6_local->dst);
-
-	rt6_local->rt6i_idev  = in6_dev_get(dev);
-	rt6_local->rt6i_flags = RTF_UP | RTF_NONEXTHOP | RTF_LOCAL;
-	rt6_local->rt6i_table = rt6i_table;
-	rt6_local->dst.input  = ip6_input;
-
+	rt6->dst.output = vrf_output6;
 	rcu_assign_pointer(vrf->rt6, rt6);
 	rcu_assign_pointer(vrf->rt6_local, rt6_local);
 
@@ -576,16 +559,7 @@ static int vrf_rtable_create(struct net_device *dev)
 	if (!rth)
 		return -ENOMEM;
 
-	/* create a dst for local ingress routing - packets sent locally
-	 * to local address via the VRF device as a loopback
-	 */
-	rth_local = rt_dst_alloc(dev, RTCF_LOCAL, RTN_LOCAL, 1, 1, 0);
-	if (!rth_local) {
-		dst_release(&rth->dst);
-		return -ENOMEM;
-	}
-
-	rth->dst.output	= vrf_output;
+	rth->dst.output = vrf_output;
 	rth->rt_table_id = vrf->tb_id;
 
 	rth_local->rt_table_id = vrf->tb_id;

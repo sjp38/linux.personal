@@ -474,7 +474,7 @@ static bool __oom_reap_task(struct task_struct *tsk)
 	if (!p)
 		goto unlock_oom;
 	mm = p->mm;
-	atomic_inc(&mm->mm_count);
+	atomic_inc(&mm->mm_users);
 	task_unlock(p);
 
 	if (!down_read_trylock(&mm->mmap_sem)) {

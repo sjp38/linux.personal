@@ -290,7 +290,6 @@ void __dump_page_owner(struct page *page)
 		.max_entries = PAGE_OWNER_STACK_DEPTH,
 		.skip = 0
 	};
-	depot_stack_handle_t handle;
 	gfp_t gfp_mask;
 	int mt;
 
