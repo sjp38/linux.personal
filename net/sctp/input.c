@@ -130,10 +130,7 @@ int sctp_rcv(struct sk_buff *skb)
 		       skb_transport_offset(skb))
 		goto discard_it;
 
-	if (!pskb_may_pull(skb, sizeof(struct sctphdr)))
-		goto discard_it;
-
-	/* Pull up the IP header. */
+	/* Pull up the IP and SCTP headers. */
 	__skb_pull(skb, skb_transport_offset(skb));
 
 	skb->csum_valid = 0; /* Previous value not applicable */

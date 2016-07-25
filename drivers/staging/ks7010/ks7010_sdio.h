@@ -19,6 +19,7 @@
 /*  SDIO KeyStream vendor and device */
 #define SDIO_VENDOR_ID_KS_CODE_A	0x005b
 #define SDIO_VENDOR_ID_KS_CODE_B	0x0023
+/* Older sources suggest earlier versions were named 7910 or 79xx */
 #define SDIO_DEVICE_ID_KS_7010		0x7910
 
 /* Read Status Register */
@@ -142,7 +143,5 @@ struct rx_device {
 	spinlock_t rx_dev_lock;
 };
 #define	ROM_FILE "ks7010sd.rom"
-#define	CFG_FILE "ks79xx.cfg"
-#define	KS_WLAN_DRIVER_VERSION_INFO  "ks7010 sdio linux 007"
 
 #endif /* _KS7010_SDIO_H */

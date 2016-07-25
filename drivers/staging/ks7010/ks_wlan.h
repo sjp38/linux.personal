@@ -73,7 +73,6 @@ struct ks_wlan_parameter {
 	uint16_t phy_type;	/* 11b/11g/11bg mode type */
 	uint16_t cts_mode;	/* for 11g/11bg mode cts mode */
 	uint16_t phy_info_timer;	/* phy information timer */
-	char rom_file[256];
 };
 
 enum {
@@ -499,5 +498,8 @@ struct ks_wlan_private {
 
 	uint wakeup_count;	/* for detect wakeup loop */
 };
+
+extern int ks_wlan_net_start(struct net_device *dev);
+extern int ks_wlan_net_stop(struct net_device *dev);
 
 #endif /* _KS_WLAN_H */

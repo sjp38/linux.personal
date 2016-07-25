@@ -1910,11 +1910,8 @@ static int ks_wlan_set_encode_ext(struct net_device *dev,
 			priv->wpa.txkey = index;
 			commit |= SME_WEP_INDEX;
 		} else if (enc->ext_flags & IW_ENCODE_EXT_RX_SEQ_VALID) {
-			if (enc->rx_seq)
-				memcpy(&priv->wpa.key[index].rx_seq[0],
-				       enc->rx_seq, IW_ENCODE_SEQ_MAX_SIZE);
-			else
-				return -EINVAL;
+			memcpy(&priv->wpa.key[index].rx_seq[0],
+			       enc->rx_seq, IW_ENCODE_SEQ_MAX_SIZE);
 		}
 
 		memcpy(&priv->wpa.key[index].addr.sa_data[0],
@@ -1935,7 +1932,7 @@ static int ks_wlan_set_encode_ext(struct net_device *dev,
 				priv->reg.privacy_invoked = 0x01;
 				commit |= SME_WEP_FLAG;
 			}
-			if (enc->key && enc->key_len) {
+			if (enc->key_len) {
 				memcpy(&priv->wpa.key[index].key_val[0],
 				       &enc->key[0], enc->key_len);
 				priv->wpa.key[index].key_len = enc->key_len;
@@ -1947,7 +1944,7 @@ static int ks_wlan_set_encode_ext(struct net_device *dev,
 				priv->reg.privacy_invoked = 0x01;
 				commit |= SME_WEP_FLAG;
 			}
-			if (enc->key && enc->key_len == 32) {
+			if (enc->key_len == 32) {
 				memcpy(&priv->wpa.key[index].key_val[0],
 				       &enc->key[0], enc->key_len - 16);
 				priv->wpa.key[index].key_len =
@@ -2196,17 +2193,6 @@ static int ks_wlan_set_mlme(struct net_device *dev,
 	default:
 		return -EOPNOTSUPP;	/* Not Support */
 	}
-}
-
-/*------------------------------------------------------------------*/
-/* Private handler : get driver version */
-static int ks_wlan_get_driver_version(struct net_device *dev,
-				      struct iw_request_info *info,
-				      struct iw_point *dwrq, char *extra)
-{
-	strcpy(extra, KS_WLAN_DRIVER_VERSION_INFO);
-	dwrq->length = strlen(KS_WLAN_DRIVER_VERSION_INFO) + 1;
-	return 0;
 }
 
 /*------------------------------------------------------------------*/
@@ -3128,8 +3114,6 @@ static int ks_wlan_hostt(struct net_device *dev, struct iw_request_info *info,
 
 static const struct iw_priv_args ks_wlan_private_args[] = {
 /*{ cmd, set_args, get_args, name[16] } */
-	{KS_WLAN_GET_DRIVER_VERSION, IW_PRIV_TYPE_NONE,
-	 IW_PRIV_TYPE_CHAR | (128 + 1), "GetDriverVer"},
 	{KS_WLAN_GET_FIRM_VERSION, IW_PRIV_TYPE_NONE,
 	 IW_PRIV_TYPE_CHAR | (128 + 1), "GetFirmwareVer"},
 #ifdef WPS
@@ -3258,7 +3242,7 @@ static const iw_handler ks_wlan_handler[] = {
 /* private_handler */
 static const iw_handler ks_wlan_private_handler[] = {
 	(iw_handler) NULL,	/*  0 */
-	(iw_handler) ks_wlan_get_driver_version,	/*  1 KS_WLAN_GET_DRIVER_VERSION */
+	(iw_handler) NULL,	/*  1, used to be: KS_WLAN_GET_DRIVER_VERSION */
 	(iw_handler) NULL,	/*  2 */
 	(iw_handler) ks_wlan_get_firmware_version,	/*  3 KS_WLAN_GET_FIRM_VERSION */
 #ifdef WPS

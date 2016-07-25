@@ -907,7 +907,8 @@ static int chv_init_workarounds(struct intel_engine_cs *engine)
 
 static int gen9_init_workarounds(struct intel_engine_cs *engine)
 {
-	struct drm_i915_private *dev_priv = engine->i915;
+	struct drm_device *dev = engine->dev;
+	struct drm_i915_private *dev_priv = dev->dev_private;
 	int ret;
 
 	/* WaConextSwitchWithConcurrentTLBInvalidate:skl,bxt,kbl */
@@ -1187,11 +1188,6 @@ static int bxt_init_workarounds(struct intel_engine_cs *engine)
 			return ret;
 	}
 
-	/* WaProgramL3SqcReg1DefaultForPerf:bxt */
-	if (IS_BXT_REVID(dev_priv, BXT_REVID_B0, REVID_FOREVER))
-		I915_WRITE(GEN8_L3SQCREG1, L3_GENERAL_PRIO_CREDITS(62) |
-					   L3_HIGH_PRIO_CREDITS(2));
-
 	/* WaInsertDummyPushConstPs:bxt */
 	if (IS_BXT_REVID(dev_priv, 0, BXT_REVID_B0))
 		WA_SET_BIT_MASKED(COMMON_SLICE_CHICKEN2,
@@ -1202,7 +1198,7 @@ static int bxt_init_workarounds(struct intel_engine_cs *engine)
 
 static int kbl_init_workarounds(struct intel_engine_cs *engine)
 {
-	struct drm_i915_private *dev_priv = engine->i915;
+	struct drm_i915_private *dev_priv = engine->dev->dev_private;
 	int ret;
 
 	ret = gen9_init_workarounds(engine);

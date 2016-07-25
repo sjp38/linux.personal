@@ -1,21 +1,21 @@
 /*
- * mma8452.c - Support for following Freescale 3-axis accelerometers:
+ * mma8452.c - Support for following Freescale / NXP 3-axis accelerometers:
  *
- * MMA8451Q (14 bit)
- * MMA8452Q (12 bit)
- * MMA8453Q (10 bit)
- * MMA8652FC (12 bit)
- * MMA8653FC (10 bit)
- * FXLS8471Q (14 bit)
+ * device name	digital output	7-bit I2C slave address (pin selectable)
+ * ---------------------------------------------------------------------
+ * MMA8451Q	14 bit		0x1c / 0x1d
+ * MMA8452Q	12 bit		0x1c / 0x1d
+ * MMA8453Q	10 bit		0x1c / 0x1d
+ * MMA8652FC	12 bit		0x1d
+ * MMA8653FC	10 bit		0x1d
+ * FXLS8471Q	14 bit		0x1e / 0x1d / 0x1c / 0x1f
  *
- * Copyright 2015 Martin Kepplinger <martin.kepplinger@theobroma-systems.com>
+ * Copyright 2015 Martin Kepplinger <martink@posteo.de>
  * Copyright 2014 Peter Meerwald <pmeerw@pmeerw.net>
  *
  * This file is subject to the terms and conditions of version 2 of
  * the GNU General Public License.  See the file COPYING in the main
  * directory of this archive for more details.
- *
- * 7-bit I2C slave address 0x1c/0x1d (pin selectable)
  *
  * TODO: orientation events
  */
@@ -108,7 +108,7 @@ struct mma8452_data {
 };
 
 /**
- * struct mma_chip_info - chip specific data for Freescale's accelerometers
+ * struct mma_chip_info - chip specific data
  * @chip_id:			WHO_AM_I register's value
  * @channels:			struct iio_chan_spec matching the device's
  *				capabilities
@@ -634,11 +634,7 @@ static int mma8452_set_freefall_mode(struct mma8452_data *data, bool state)
 		val |= MMA8452_FF_MT_CFG_OAE;
 	}
 
-	val = mma8452_change_config(data, chip->ev_cfg, val);
-	if (val)
-		return val;
-
-	return 0;
+	return mma8452_change_config(data, chip->ev_cfg, val);
 }
 
 static int mma8452_set_hp_filter_frequency(struct mma8452_data *data,
@@ -917,7 +913,7 @@ static int mma8452_write_event_config(struct iio_dev *indio_dev,
 static void mma8452_transient_interrupt(struct iio_dev *indio_dev)
 {
 	struct mma8452_data *data = iio_priv(indio_dev);
-	s64 ts = iio_get_time_ns();
+	s64 ts = iio_get_time_ns(indio_dev);
 	int src;
 
 	src = i2c_smbus_read_byte_data(data->client, data->chip_info->ev_src);
@@ -997,7 +993,7 @@ static irqreturn_t mma8452_trigger_handler(int irq, void *p)
 		goto done;
 
 	iio_push_to_buffers_with_timestamp(indio_dev, buffer,
-					   iio_get_time_ns());
+					   iio_get_time_ns(indio_dev));
 
 done:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -1579,8 +1575,8 @@ static int mma8452_probe(struct i2c_client *client,
 		goto buffer_cleanup;
 
 	ret = mma8452_set_freefall_mode(data, false);
-	if (ret)
-		return ret;
+	if (ret < 0)
+		goto buffer_cleanup;
 
 	return 0;
 
@@ -1693,5 +1689,5 @@ static struct i2c_driver mma8452_driver = {
 module_i2c_driver(mma8452_driver);
 
 MODULE_AUTHOR("Peter Meerwald <pmeerw@pmeerw.net>");
-MODULE_DESCRIPTION("Freescale MMA8452 accelerometer driver");
+MODULE_DESCRIPTION("Freescale / NXP MMA8452 accelerometer driver");
 MODULE_LICENSE("GPL");
