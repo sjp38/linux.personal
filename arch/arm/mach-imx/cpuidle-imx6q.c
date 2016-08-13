@@ -10,6 +10,8 @@
 #include <linux/module.h>
 #include <asm/cpuidle.h>
 
+#include <soc/imx/cpuidle.h>
+
 #include "common.h"
 #include "cpuidle.h"
 #include "hardware.h"
@@ -72,11 +74,13 @@ void imx6q_cpuidle_fec_irqs_used(void)
 {
 	imx6q_cpuidle_driver.states[1].disabled = true;
 }
+EXPORT_SYMBOL_GPL(imx6q_cpuidle_fec_irqs_used);
 
 void imx6q_cpuidle_fec_irqs_unused(void)
 {
 	imx6q_cpuidle_driver.states[1].disabled = false;
 }
+EXPORT_SYMBOL_GPL(imx6q_cpuidle_fec_irqs_unused);
 
 int __init imx6q_cpuidle_init(void)
 {

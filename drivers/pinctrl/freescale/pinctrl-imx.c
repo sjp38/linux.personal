@@ -16,7 +16,6 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/mfd/syscon.h>
-#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_address.h>
@@ -46,7 +45,7 @@ struct imx_pinctrl {
 	const struct imx_pinctrl_soc_info *info;
 };
 
-static const inline struct imx_pin_group *imx_pinctrl_find_group_by_name(
+static inline const struct imx_pin_group *imx_pinctrl_find_group_by_name(
 				const struct imx_pinctrl_soc_info *info,
 				const char *name)
 {

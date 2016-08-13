@@ -164,13 +164,13 @@ int __init extent_io_init(void)
 {
 	extent_state_cache = kmem_cache_create("btrfs_extent_state",
 			sizeof(struct extent_state), 0,
-			SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD, NULL);
+			SLAB_MEM_SPREAD, NULL);
 	if (!extent_state_cache)
 		return -ENOMEM;
 
 	extent_buffer_cache = kmem_cache_create("btrfs_extent_buffer",
 			sizeof(struct extent_buffer), 0,
-			SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD, NULL);
+			SLAB_MEM_SPREAD, NULL);
 	if (!extent_buffer_cache)
 		goto free_state_cache;
 
@@ -2050,7 +2050,7 @@ int repair_io_failure(struct inode *inode, u64 start, u64 length, u64 logical,
 		return -EIO;
 	}
 	bio->bi_bdev = dev->bdev;
-	bio->bi_rw = WRITE_SYNC;
+	bio_set_op_attrs(bio, REQ_OP_WRITE, WRITE_SYNC);
 	bio_add_page(bio, page, length, pg_offset);
 
 	if (btrfsic_submit_bio_wait(bio)) {
@@ -2698,12 +2698,6 @@ struct bio *btrfs_bio_clone(struct bio *bio, gfp_t gfp_mask)
 		btrfs_bio->csum = NULL;
 		btrfs_bio->csum_allocated = NULL;
 		btrfs_bio->end_io = NULL;
-
-#ifdef CONFIG_BLK_CGROUP
-		/* FIXME, put this into bio_clone_bioset */
-		if (bio->bi_css)
-			bio_associate_blkcg(new, bio->bi_css);
-#endif
 	}
 	return new;
 }
@@ -2757,7 +2751,6 @@ static int merge_bio(struct extent_io_tree *tree, struct page *page,
 	if (tree->ops && tree->ops->merge_bio_hook)
 		ret = tree->ops->merge_bio_hook(page, offset, size, bio,
 						bio_flags);
-	BUG_ON(ret < 0);
 	return ret;
 
 }
@@ -3083,6 +3076,7 @@ static int __do_readpage(struct extent_io_tree *tree,
 		} else {
 			SetPageError(page);
 			unlock_extent(tree, cur, cur + iosize - 1);
+			goto out;
 		}
 		cur = cur + iosize;
 		pg_offset += iosize;
@@ -5247,7 +5241,14 @@ int read_extent_buffer_pages(struct extent_io_tree *tree,
 	atomic_set(&eb->io_pages, num_reads);
 	for (i = start_i; i < num_pages; i++) {
 		page = eb->pages[i];
+
 		if (!PageUptodate(page)) {
+			if (ret) {
+				atomic_dec(&eb->io_pages);
+				unlock_page(page);
+				continue;
+			}
+
 			ClearPageError(page);
 			err = __extent_read_full_page(tree, page,
 						      get_extent, &bio,
@@ -5258,7 +5259,8 @@ int read_extent_buffer_pages(struct extent_io_tree *tree,
 				/*
 				 * We use &bio in above __extent_read_full_page,
 				 * so we ensure that if it returns error, the
-				 * current page fails to add itself to bio.
+				 * current page fails to add itself to bio and
+				 * it's been unlocked.
 				 *
 				 * We must dec io_pages by ourselves.
 				 */

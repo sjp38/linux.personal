@@ -153,9 +153,12 @@ retry:
 		f2fs_delete_entry(de, page, dir, einode);
 		iput(einode);
 		goto retry;
+	} else if (IS_ERR(page)) {
+		err = PTR_ERR(page);
+	} else {
+		err = __f2fs_add_link(dir, &name, inode,
+					inode->i_ino, inode->i_mode);
 	}
-	err = __f2fs_add_link(dir, &name, inode, inode->i_ino, inode->i_mode);
-
 	goto out;
 
 out_unmap_put:
@@ -479,6 +482,8 @@ static int do_recover_data(struct f2fs_sb_info *sbi, struct inode *inode,
 #endif
 				/* We should not get -ENOSPC */
 				f2fs_bug_on(sbi, err);
+				if (err)
+					goto err;
 			}
 
 			/* Check the previous node page having this index */

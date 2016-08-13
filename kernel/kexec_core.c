@@ -95,6 +95,12 @@ int kexec_should_crash(struct task_struct *p)
 	return 0;
 }
 
+int kexec_crash_loaded(void)
+{
+	return !!kexec_crash_image;
+}
+EXPORT_SYMBOL_GPL(kexec_crash_loaded);
+
 /*
  * When kexec transitions to the new kernel there is a one-to-one
  * mapping between physical and virtual addresses.  On processors
@@ -140,6 +146,7 @@ int kexec_should_crash(struct task_struct *p)
  * allocating pages whose destination address we do not care about.
  */
 #define KIMAGE_NO_DEST (-1UL)
+#define PAGE_COUNT(x) (((x) + PAGE_SIZE - 1) >> PAGE_SHIFT)
 
 static struct page *kimage_alloc_page(struct kimage *image,
 				       gfp_t gfp_mask,
@@ -149,6 +156,7 @@ int sanity_check_segment_list(struct kimage *image)
 {
 	int i;
 	unsigned long nr_segments = image->nr_segments;
+	unsigned long total_pages = 0;
 
 	/*
 	 * Verify we have good destination addresses.  The caller is
@@ -207,6 +215,21 @@ int sanity_check_segment_list(struct kimage *image)
 		if (image->segment[i].bufsz > image->segment[i].memsz)
 			return -EINVAL;
 	}
+
+	/*
+	 * Verify that no more than half of memory will be consumed. If the
+	 * request from userspace is too large, a large amount of time will be
+	 * wasted allocating pages, which can cause a soft lockup.
+	 */
+	for (i = 0; i < nr_segments; i++) {
+		if (PAGE_COUNT(image->segment[i].memsz) > totalram_pages / 2)
+			return -EINVAL;
+
+		total_pages += PAGE_COUNT(image->segment[i].memsz);
+	}
+
+	if (total_pages > totalram_pages / 2)
+		return -EINVAL;
 
 	/*
 	 * Verify we have good destination addresses.  Normally

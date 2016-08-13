@@ -52,7 +52,6 @@
 #include <linux/poll.h>
 #include <linux/ratelimit.h>
 #include <linux/sched.h>
-#include <linux/seqlock.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
@@ -86,6 +85,8 @@ struct drm_local_map;
 struct drm_device_dma;
 struct drm_dma_handle;
 struct drm_gem_object;
+struct drm_master;
+struct drm_vblank_crtc;
 
 struct device_node;
 struct videomode;
@@ -303,8 +304,6 @@ struct drm_prime_file_private {
 /** File private data */
 struct drm_file {
 	unsigned authenticated :1;
-	/* Whether we're master for a minor. Protected by master_mutex */
-	unsigned is_master :1;
 	/* true when the client has asked us to expose stereo 3D mode flags */
 	unsigned stereo_allowed :1;
 	/*
@@ -315,10 +314,10 @@ struct drm_file {
 	/* true if client understands atomic properties */
 	unsigned atomic:1;
 	/*
-	 * This client is allowed to gain master privileges for @master.
+	 * This client is the creator of @master.
 	 * Protected by struct drm_device::master_mutex.
 	 */
-	unsigned allowed_master:1;
+	unsigned is_master:1;
 
 	struct pid *pid;
 	kuid_t uid;
@@ -336,7 +335,7 @@ struct drm_file {
 	void *driver_priv;
 
 	struct drm_master *master; /* master this node is currently associated with
-				      N.B. not always minor->master */
+				      N.B. not always dev->master */
 	/**
 	 * fbs - List of framebuffers associated with this file.
 	 *
@@ -373,30 +372,6 @@ struct drm_lock_data {
 	uint32_t kernel_waiters;
 	uint32_t user_waiters;
 	int idle_has_lock;
-};
-
-/**
- * struct drm_master - drm master structure
- *
- * @refcount: Refcount for this master object.
- * @dev: Link back to the DRM device
- * @unique: Unique identifier: e.g. busid. Protected by drm_global_mutex.
- * @unique_len: Length of unique field. Protected by drm_global_mutex.
- * @magic_map: Map of used authentication tokens. Protected by struct_mutex.
- * @lock: DRI lock information.
- * @driver_priv: Pointer to driver-private information.
- *
- * Note that master structures are only relevant for the legacy/primary device
- * nodes, hence there can only be one per device, not one per drm_minor.
- */
-struct drm_master {
-	struct kref refcount;
-	struct drm_device *dev;
-	char *unique;
-	int unique_len;
-	struct idr magic_map;
-	struct drm_lock_data lock;
-	void *driver_priv;
 };
 
 /* Flags and return codes for get_vblank_timestamp() driver function. */
@@ -573,8 +548,7 @@ struct drm_driver {
 
 	int (*master_set)(struct drm_device *dev, struct drm_file *file_priv,
 			  bool from_open);
-	void (*master_drop)(struct drm_device *dev, struct drm_file *file_priv,
-			    bool from_release);
+	void (*master_drop)(struct drm_device *dev, struct drm_file *file_priv);
 
 	int (*debugfs_init)(struct drm_minor *minor);
 	void (*debugfs_cleanup)(struct drm_minor *minor);
@@ -708,38 +682,6 @@ struct drm_minor {
 
 	struct list_head debugfs_list;
 	struct mutex debugfs_lock; /* Protects debugfs_list. */
-
-	/* currently active master for this node. Protected by master_mutex */
-	struct drm_master *master;
-};
-
-
-struct drm_pending_vblank_event {
-	struct drm_pending_event base;
-	unsigned int pipe;
-	struct drm_event_vblank event;
-};
-
-struct drm_vblank_crtc {
-	struct drm_device *dev;		/* pointer to the drm_device */
-	wait_queue_head_t queue;	/**< VBLANK wait queue */
-	struct timer_list disable_timer;		/* delayed disable timer */
-
-	seqlock_t seqlock;		/* protects vblank count and time */
-
-	u32 count;			/* vblank counter */
-	struct timeval time;		/* vblank timestamp */
-
-	atomic_t refcount;		/* number of users of vblank interruptsper crtc */
-	u32 last;			/* protected by dev->vbl_lock, used */
-					/* for wraparound handling */
-	u32 last_wait;			/* Last vblank seqno waited per CRTC */
-	unsigned int inmodeset;		/* Display driver is setting mode */
-	unsigned int pipe;		/* crtc index */
-	int framedur_ns;		/* frame/field duration in ns */
-	int linedur_ns;			/* line duration in ns */
-	bool enabled;			/* so we don't call enable more than
-					   once per disable */
 };
 
 /**
@@ -759,6 +701,10 @@ struct drm_device {
 	struct drm_minor *control;		/**< Control node */
 	struct drm_minor *primary;		/**< Primary node */
 	struct drm_minor *render;		/**< Render node */
+
+	/* currently active master for this device. Protected by master_mutex */
+	struct drm_master *master;
+
 	atomic_t unplugged;			/**< Flag whether dev is dead */
 	struct inode *anon_inode;		/**< inode for private address-space */
 	char *unique;				/**< unique name of the device */
@@ -872,6 +818,8 @@ struct drm_device {
 	int switch_power_state;
 };
 
+#include <drm/drm_irq.h>
+
 #define DRM_SWITCH_POWER_ON 0
 #define DRM_SWITCH_POWER_OFF 1
 #define DRM_SWITCH_POWER_CHANGING 2
@@ -958,70 +906,14 @@ void drm_clflush_virt_range(void *addr, unsigned long length);
  * DMA quiscent + idle. DMA quiescent usually requires the hardware lock.
  */
 
-				/* IRQ support (drm_irq.h) */
-extern int drm_irq_install(struct drm_device *dev, int irq);
-extern int drm_irq_uninstall(struct drm_device *dev);
-
-extern int drm_vblank_init(struct drm_device *dev, unsigned int num_crtcs);
-extern int drm_wait_vblank(struct drm_device *dev, void *data,
-			   struct drm_file *filp);
-extern u32 drm_vblank_count(struct drm_device *dev, unsigned int pipe);
-extern u32 drm_crtc_vblank_count(struct drm_crtc *crtc);
-extern u32 drm_vblank_count_and_time(struct drm_device *dev, unsigned int pipe,
-				     struct timeval *vblanktime);
-extern u32 drm_crtc_vblank_count_and_time(struct drm_crtc *crtc,
-					  struct timeval *vblanktime);
-extern void drm_crtc_send_vblank_event(struct drm_crtc *crtc,
-				       struct drm_pending_vblank_event *e);
-extern void drm_crtc_arm_vblank_event(struct drm_crtc *crtc,
-				      struct drm_pending_vblank_event *e);
-extern bool drm_handle_vblank(struct drm_device *dev, unsigned int pipe);
-extern bool drm_crtc_handle_vblank(struct drm_crtc *crtc);
-extern int drm_crtc_vblank_get(struct drm_crtc *crtc);
-extern void drm_crtc_vblank_put(struct drm_crtc *crtc);
-extern void drm_wait_one_vblank(struct drm_device *dev, unsigned int pipe);
-extern void drm_crtc_wait_one_vblank(struct drm_crtc *crtc);
-extern void drm_vblank_off(struct drm_device *dev, unsigned int pipe);
-extern void drm_vblank_on(struct drm_device *dev, unsigned int pipe);
-extern void drm_crtc_vblank_off(struct drm_crtc *crtc);
-extern void drm_crtc_vblank_reset(struct drm_crtc *crtc);
-extern void drm_crtc_vblank_on(struct drm_crtc *crtc);
-extern void drm_vblank_cleanup(struct drm_device *dev);
-extern u32 drm_accurate_vblank_count(struct drm_crtc *crtc);
-extern u32 drm_vblank_no_hw_counter(struct drm_device *dev, unsigned int pipe);
-
-extern int drm_calc_vbltimestamp_from_scanoutpos(struct drm_device *dev,
-						 unsigned int pipe, int *max_error,
-						 struct timeval *vblank_time,
-						 unsigned flags,
-						 const struct drm_display_mode *mode);
-extern void drm_calc_timestamping_constants(struct drm_crtc *crtc,
-					    const struct drm_display_mode *mode);
-
-/**
- * drm_crtc_vblank_waitqueue - get vblank waitqueue for the CRTC
- * @crtc: which CRTC's vblank waitqueue to retrieve
- *
- * This function returns a pointer to the vblank waitqueue for the CRTC.
- * Drivers can use this to implement vblank waits using wait_event() & co.
- */
-static inline wait_queue_head_t *drm_crtc_vblank_waitqueue(struct drm_crtc *crtc)
-{
-	return &crtc->dev->vblank[drm_crtc_index(crtc)].queue;
-}
-
 /* Modesetting support */
 extern void drm_vblank_pre_modeset(struct drm_device *dev, unsigned int pipe);
 extern void drm_vblank_post_modeset(struct drm_device *dev, unsigned int pipe);
 
-				/* Stub support (drm_stub.h) */
-extern struct drm_master *drm_master_get(struct drm_master *master);
-extern void drm_master_put(struct drm_master **master);
-
-extern void drm_put_dev(struct drm_device *dev);
-extern void drm_unplug_dev(struct drm_device *dev);
+/* drm_drv.c */
+void drm_put_dev(struct drm_device *dev);
+void drm_unplug_dev(struct drm_device *dev);
 extern unsigned int drm_debug;
-extern bool drm_atomic;
 
 				/* Debugfs support */
 #if defined(CONFIG_DEBUG_FS)
@@ -1072,11 +964,13 @@ extern void drm_sysfs_hotplug_event(struct drm_device *dev);
 
 struct drm_device *drm_dev_alloc(struct drm_driver *driver,
 				 struct device *parent);
+int drm_dev_init(struct drm_device *dev,
+		 struct drm_driver *driver,
+		 struct device *parent);
 void drm_dev_ref(struct drm_device *dev);
 void drm_dev_unref(struct drm_device *dev);
 int drm_dev_register(struct drm_device *dev, unsigned long flags);
 void drm_dev_unregister(struct drm_device *dev);
-int drm_dev_set_unique(struct drm_device *dev, const char *name);
 
 struct drm_minor *drm_minor_acquire(unsigned int minor_id);
 void drm_minor_release(struct drm_minor *minor);
@@ -1129,7 +1023,6 @@ extern int drm_pcie_get_max_link_width(struct drm_device *dev, u32 *mlw);
 
 /* platform section */
 extern int drm_platform_init(struct drm_driver *driver, struct platform_device *platform_device);
-extern int drm_platform_set_busid(struct drm_device *d, struct drm_master *m);
 
 /* returns true if currently okay to sleep */
 static __inline__ bool drm_can_sleep(void)

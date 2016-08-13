@@ -854,10 +854,9 @@ static int sirfsoc_dma_probe(struct platform_device *op)
 	int ret, i;
 
 	sdma = devm_kzalloc(dev, sizeof(*sdma), GFP_KERNEL);
-	if (!sdma) {
-		dev_err(dev, "Memory exhausted!\n");
+	if (!sdma)
 		return -ENOMEM;
-	}
+
 	data = (struct sirfsoc_dmadata *)
 		(of_match_device(op->dev.driver->of_match_table,
 				 &op->dev)->data);
@@ -981,6 +980,7 @@ static int sirfsoc_dma_remove(struct platform_device *op)
 	of_dma_controller_free(op->dev.of_node);
 	dma_async_device_unregister(&sdma->dma);
 	free_irq(sdma->irq, sdma);
+	tasklet_kill(&sdma->tasklet);
 	irq_dispose_mapping(sdma->irq);
 	pm_runtime_disable(&op->dev);
 	if (!pm_runtime_status_suspended(&op->dev))

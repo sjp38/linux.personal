@@ -245,10 +245,27 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
 	}
 }
 
+static inline void dump_handler(const char *symbol, void *start, void *end)
+{
+	u32 *p;
+
+	pr_debug("LEAF(%s)\n", symbol);
+
+	pr_debug("\t.set push\n");
+	pr_debug("\t.set noreorder\n");
+
+	for (p = start; p < (u32 *)end; ++p)
+		pr_debug("\t.word\t0x%08x\t\t# %p\n", *p, p);
+
+	pr_debug("\t.set\tpop\n");
+
+	pr_debug("\tEND(%s)\n", symbol);
+}
+
 struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm, unsigned int id)
 {
-	int err, size, offset;
-	void *gebase;
+	int err, size;
+	void *gebase, *p, *handler;
 	int i;
 
 	struct kvm_vcpu *vcpu = kzalloc(sizeof(struct kvm_vcpu), GFP_KERNEL);
@@ -283,44 +300,53 @@ struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm, unsigned int id)
 	kvm_debug("Allocated %d bytes for KVM Exception Handlers @ %p\n",
 		  ALIGN(size, PAGE_SIZE), gebase);
 
+	/*
+	 * Check new ebase actually fits in CP0_EBase. The lack of a write gate
+	 * limits us to the low 512MB of physical address space. If the memory
+	 * we allocate is out of range, just give up now.
+	 */
+	if (!cpu_has_ebase_wg && virt_to_phys(gebase) >= 0x20000000) {
+		kvm_err("CP0_EBase.WG required for guest exception base %pK\n",
+			gebase);
+		err = -ENOMEM;
+		goto out_free_gebase;
+	}
+
 	/* Save new ebase */
 	vcpu->arch.guest_ebase = gebase;
 
-	/* Copy L1 Guest Exception handler to correct offset */
+	/* Build guest exception vectors dynamically in unmapped memory */
+	handler = gebase + 0x2000;
 
 	/* TLB Refill, EXL = 0 */
-	memcpy(gebase, mips32_exception,
-	       mips32_exceptionEnd - mips32_exception);
+	kvm_mips_build_exception(gebase, handler);
 
 	/* General Exception Entry point */
-	memcpy(gebase + 0x180, mips32_exception,
-	       mips32_exceptionEnd - mips32_exception);
+	kvm_mips_build_exception(gebase + 0x180, handler);
 
 	/* For vectored interrupts poke the exception code @ all offsets 0-7 */
 	for (i = 0; i < 8; i++) {
 		kvm_debug("L1 Vectored handler @ %p\n",
 			  gebase + 0x200 + (i * VECTORSPACING));
-		memcpy(gebase + 0x200 + (i * VECTORSPACING), mips32_exception,
-		       mips32_exceptionEnd - mips32_exception);
+		kvm_mips_build_exception(gebase + 0x200 + i * VECTORSPACING,
+					 handler);
 	}
 
-	/* General handler, relocate to unmapped space for sanity's sake */
-	offset = 0x2000;
-	kvm_debug("Installing KVM Exception handlers @ %p, %#x bytes\n",
-		  gebase + offset,
-		  mips32_GuestExceptionEnd - mips32_GuestException);
+	/* General exit handler */
+	p = handler;
+	p = kvm_mips_build_exit(p);
 
-	memcpy(gebase + offset, mips32_GuestException,
-	       mips32_GuestExceptionEnd - mips32_GuestException);
+	/* Guest entry routine */
+	vcpu->arch.vcpu_run = p;
+	p = kvm_mips_build_vcpu_run(p);
 
-#ifdef MODULE
-	offset += mips32_GuestExceptionEnd - mips32_GuestException;
-	memcpy(gebase + offset, (char *)__kvm_mips_vcpu_run,
-	       __kvm_mips_vcpu_run_end - (char *)__kvm_mips_vcpu_run);
-	vcpu->arch.vcpu_run = gebase + offset;
-#else
-	vcpu->arch.vcpu_run = __kvm_mips_vcpu_run;
-#endif
+	/* Dump the generated code */
+	pr_debug("#include <asm/asm.h>\n");
+	pr_debug("#include <asm/regdef.h>\n");
+	pr_debug("\n");
+	dump_handler("kvm_vcpu_run", vcpu->arch.vcpu_run, p);
+	dump_handler("kvm_gen_exc", gebase + 0x180, gebase + 0x200);
+	dump_handler("kvm_exit", gebase + 0x2000, vcpu->arch.vcpu_run);
 
 	/* Invalidate the icache for these ranges */
 	local_flush_icache_range((unsigned long)gebase,
@@ -406,7 +432,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 	kvm_mips_deliver_interrupts(vcpu,
 				    kvm_read_c0_guest_cause(vcpu->arch.cop0));
 
-	__kvm_guest_enter();
+	guest_enter_irqoff();
 
 	/* Disable hardware page table walking while in guest */
 	htw_stop();
@@ -418,7 +444,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 	/* Re-enable HTW before enabling interrupts */
 	htw_start();
 
-	__kvm_guest_exit();
+	guest_exit_irqoff();
 	local_irq_enable();
 
 	if (vcpu->sigset_active)
@@ -507,8 +533,10 @@ static u64 kvm_mips_get_one_regs[] = {
 	KVM_REG_MIPS_R30,
 	KVM_REG_MIPS_R31,
 
+#ifndef CONFIG_CPU_MIPSR6
 	KVM_REG_MIPS_HI,
 	KVM_REG_MIPS_LO,
+#endif
 	KVM_REG_MIPS_PC,
 
 	KVM_REG_MIPS_CP0_INDEX,
@@ -652,12 +680,14 @@ static int kvm_mips_get_reg(struct kvm_vcpu *vcpu,
 	case KVM_REG_MIPS_R0 ... KVM_REG_MIPS_R31:
 		v = (long)vcpu->arch.gprs[reg->id - KVM_REG_MIPS_R0];
 		break;
+#ifndef CONFIG_CPU_MIPSR6
 	case KVM_REG_MIPS_HI:
 		v = (long)vcpu->arch.hi;
 		break;
 	case KVM_REG_MIPS_LO:
 		v = (long)vcpu->arch.lo;
 		break;
+#endif
 	case KVM_REG_MIPS_PC:
 		v = (long)vcpu->arch.pc;
 		break;
@@ -873,12 +903,14 @@ static int kvm_mips_set_reg(struct kvm_vcpu *vcpu,
 	case KVM_REG_MIPS_R1 ... KVM_REG_MIPS_R31:
 		vcpu->arch.gprs[reg->id - KVM_REG_MIPS_R0] = v;
 		break;
+#ifndef CONFIG_CPU_MIPSR6
 	case KVM_REG_MIPS_HI:
 		vcpu->arch.hi = v;
 		break;
 	case KVM_REG_MIPS_LO:
 		vcpu->arch.lo = v;
 		break;
+#endif
 	case KVM_REG_MIPS_PC:
 		vcpu->arch.pc = v;
 		break;
@@ -1762,6 +1794,10 @@ static struct notifier_block kvm_mips_csr_die_notifier = {
 static int __init kvm_mips_init(void)
 {
 	int ret;
+
+	ret = kvm_mips_entry_setup();
+	if (ret)
+		return ret;
 
 	ret = kvm_init(NULL, sizeof(struct kvm_vcpu), 0, THIS_MODULE);
 

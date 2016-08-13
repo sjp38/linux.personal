@@ -434,8 +434,8 @@ static int microMIPS32_to_MIPS32(union mips_instruction *insn_ptr)
  * a single subroutine should be used across both
  * modules.
  */
-static int isBranchInstr(struct pt_regs *regs, struct mm_decoded_insn dec_insn,
-			 unsigned long *contpc)
+int isBranchInstr(struct pt_regs *regs, struct mm_decoded_insn dec_insn,
+		  unsigned long *contpc)
 {
 	union mips_instruction insn = (union mips_instruction)dec_insn.insn;
 	unsigned int fcr31;
@@ -627,8 +627,8 @@ static int isBranchInstr(struct pt_regs *regs, struct mm_decoded_insn dec_insn,
 				dec_insn.pc_inc +
 				dec_insn.next_pc_inc;
 		return 1;
-	case cbcond0_op:
-	case cbcond1_op:
+	case pop10_op:
+	case pop30_op:
 		if (!cpu_has_mips_r6)
 			break;
 		if (insn.i_format.rt && !insn.i_format.rs)
@@ -683,14 +683,14 @@ static int isBranchInstr(struct pt_regs *regs, struct mm_decoded_insn dec_insn,
 			dec_insn.next_pc_inc;
 
 		return 1;
-	case beqzcjic_op:
+	case pop66_op:
 		if (!cpu_has_mips_r6)
 			break;
 		*contpc = regs->cp0_epc + dec_insn.pc_inc +
 			dec_insn.next_pc_inc;
 
 		return 1;
-	case bnezcjialc_op:
+	case pop76_op:
 		if (!cpu_has_mips_r6)
 			break;
 		if (!insn.i_format.rs)
@@ -1268,7 +1268,7 @@ branch_common:
 						 * instruction in the dslot.
 						 */
 						sig = mips_dsemul(xcp, ir,
-								  contpc);
+								  bcpc, contpc);
 						if (sig < 0)
 							break;
 						if (sig)
@@ -1323,7 +1323,7 @@ branch_common:
 				 * Single step the non-cp1
 				 * instruction in the dslot
 				 */
-				sig = mips_dsemul(xcp, ir, contpc);
+				sig = mips_dsemul(xcp, ir, bcpc, contpc);
 				if (sig < 0)
 					break;
 				if (sig)

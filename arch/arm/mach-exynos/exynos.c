@@ -14,7 +14,6 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_fdt.h>
-#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/irqchip.h>
 #include <linux/soc/samsung/exynos-regs-pmu.h>
@@ -25,6 +24,7 @@
 #include <asm/mach/map.h>
 
 #include <mach/map.h>
+#include <plat/cpu.h>
 
 #include "common.h"
 
@@ -216,8 +216,6 @@ static void __init exynos_dt_machine_init(void)
 	    of_machine_is_compatible("samsung,exynos3250") ||
 	    of_machine_is_compatible("samsung,exynos5250"))
 		platform_device_register(&exynos_cpuidle);
-
-	of_platform_populate(NULL, of_default_bus_match_table, NULL, NULL);
 }
 
 static char const *const exynos_dt_compat[] __initconst = {

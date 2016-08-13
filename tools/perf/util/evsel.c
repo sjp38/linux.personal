@@ -200,6 +200,24 @@ void perf_evsel__set_sample_id(struct perf_evsel *evsel,
 	evsel->attr.read_format |= PERF_FORMAT_ID;
 }
 
+/**
+ * perf_evsel__is_function_event - Return whether given evsel is a function
+ * trace event
+ *
+ * @evsel - evsel selector to be tested
+ *
+ * Return %true if event is function trace event
+ */
+bool perf_evsel__is_function_event(struct perf_evsel *evsel)
+{
+#define FUNCTION_EVENT "ftrace:function"
+
+	return evsel->name &&
+	       !strncmp(FUNCTION_EVENT, evsel->name, sizeof(FUNCTION_EVENT));
+
+#undef FUNCTION_EVENT
+}
+
 void perf_evsel__init(struct perf_evsel *evsel,
 		      struct perf_event_attr *attr, int idx)
 {
@@ -233,6 +251,34 @@ struct perf_evsel *perf_evsel__new_idx(struct perf_event_attr *attr, int idx)
 	}
 
 	return evsel;
+}
+
+struct perf_evsel *perf_evsel__new_cycles(void)
+{
+	struct perf_event_attr attr = {
+		.type	= PERF_TYPE_HARDWARE,
+		.config	= PERF_COUNT_HW_CPU_CYCLES,
+	};
+	struct perf_evsel *evsel;
+
+	event_attr_init(&attr);
+
+	perf_event_attr__set_max_precise_ip(&attr);
+
+	evsel = perf_evsel__new(&attr);
+	if (evsel == NULL)
+		goto out;
+
+	/* use asprintf() because free(evsel) assumes name is allocated */
+	if (asprintf(&evsel->name, "cycles%.*s",
+		     attr.precise_ip ? attr.precise_ip + 1 : 0, ":ppp") < 0)
+		goto error_free;
+out:
+	return evsel;
+error_free:
+	perf_evsel__delete(evsel);
+	evsel = NULL;
+	goto out;
 }
 
 /*
@@ -677,6 +723,9 @@ static void apply_config_terms(struct perf_evsel *evsel,
 			 */
 			attr->inherit = term->val.inherit ? 1 : 0;
 			break;
+		case PERF_EVSEL__CONFIG_TERM_OVERWRITE:
+			attr->write_backward = term->val.overwrite ? 1 : 0;
+			break;
 		default:
 			break;
 		}
@@ -758,6 +807,7 @@ void perf_evsel__config(struct perf_evsel *evsel, struct record_opts *opts,
 
 	attr->sample_id_all = perf_missing_features.sample_id_all ? 0 : 1;
 	attr->inherit	    = !opts->no_inherit;
+	attr->write_backward = opts->overwrite ? 1 : 0;
 
 	perf_evsel__set_sample_bit(evsel, IP);
 	perf_evsel__set_sample_bit(evsel, TID);
@@ -832,7 +882,7 @@ void perf_evsel__config(struct perf_evsel *evsel, struct record_opts *opts,
 		perf_evsel__set_sample_bit(evsel, REGS_INTR);
 	}
 
-	if (target__has_cpu(&opts->target))
+	if (target__has_cpu(&opts->target) || opts->sample_cpu)
 		perf_evsel__set_sample_bit(evsel, CPU);
 
 	if (opts->period)
@@ -1359,6 +1409,9 @@ static int __perf_evsel__open(struct perf_evsel *evsel, struct cpu_map *cpus,
 	int pid = -1, err;
 	enum { NO_CHANGE, SET_TO_MAX, INCREASED_MAX } set_rlimit = NO_CHANGE;
 
+	if (perf_missing_features.write_backward && evsel->attr.write_backward)
+		return -EINVAL;
+
 	if (evsel->system_wide)
 		nthreads = 1;
 	else
@@ -1389,8 +1442,6 @@ fallback_missing_features:
 	if (perf_missing_features.lbr_flags)
 		evsel->attr.branch_sample_type &= ~(PERF_SAMPLE_BRANCH_NO_FLAGS |
 				     PERF_SAMPLE_BRANCH_NO_CYCLES);
-	if (perf_missing_features.write_backward)
-		evsel->attr.write_backward = false;
 retry_sample_id:
 	if (perf_missing_features.sample_id_all)
 		evsel->attr.sample_id_all = 0;
@@ -1453,12 +1504,6 @@ retry_open:
 				err = -EINVAL;
 				goto out_close;
 			}
-
-			if (evsel->overwrite &&
-			    perf_missing_features.write_backward) {
-				err = -EINVAL;
-				goto out_close;
-			}
 		}
 	}
 
@@ -1496,7 +1541,10 @@ try_fallback:
 	 * Must probe features in the order they were added to the
 	 * perf_event_attr interface.
 	 */
-	if (!perf_missing_features.clockid_wrong && evsel->attr.use_clockid) {
+	if (!perf_missing_features.write_backward && evsel->attr.write_backward) {
+		perf_missing_features.write_backward = true;
+		goto out_close;
+	} else if (!perf_missing_features.clockid_wrong && evsel->attr.use_clockid) {
 		perf_missing_features.clockid_wrong = true;
 		goto fallback_missing_features;
 	} else if (!perf_missing_features.clockid && evsel->attr.use_clockid) {
@@ -1521,12 +1569,7 @@ try_fallback:
 			  PERF_SAMPLE_BRANCH_NO_FLAGS))) {
 		perf_missing_features.lbr_flags = true;
 		goto fallback_missing_features;
-	} else if (!perf_missing_features.write_backward &&
-			evsel->attr.write_backward) {
-		perf_missing_features.write_backward = true;
-		goto fallback_missing_features;
 	}
-
 out_close:
 	do {
 		while (--thread >= 0) {
@@ -2409,6 +2452,8 @@ int perf_evsel__open_strerror(struct perf_evsel *evsel, struct target *target,
 	"We found oprofile daemon running, please stop it and try again.");
 		break;
 	case EINVAL:
+		if (evsel->attr.write_backward && perf_missing_features.write_backward)
+			return scnprintf(msg, size, "Reading from overwrite event is not supported by this kernel.");
 		if (perf_missing_features.clockid)
 			return scnprintf(msg, size, "clockid feature not supported.");
 		if (perf_missing_features.clockid_wrong)
@@ -2422,6 +2467,13 @@ int perf_evsel__open_strerror(struct perf_evsel *evsel, struct target *target,
 	"The sys_perf_event_open() syscall returned with %d (%s) for event (%s).\n"
 	"/bin/dmesg may provide additional information.\n"
 	"No CONFIG_PERF_EVENTS=y kernel support configured?",
-			 err, strerror_r(err, sbuf, sizeof(sbuf)),
+			 err, str_error_r(err, sbuf, sizeof(sbuf)),
 			 perf_evsel__name(evsel));
+}
+
+char *perf_evsel__env_arch(struct perf_evsel *evsel)
+{
+	if (evsel && evsel->evlist && evsel->evlist->env)
+		return evsel->evlist->env->arch;
+	return NULL;
 }

@@ -16,7 +16,6 @@
 #include <linux/gpio/driver.h>
 #include <linux/gpio/machine.h>
 #include <linux/pinctrl/consumer.h>
-#include <linux/idr.h>
 #include <linux/cdev.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
@@ -474,6 +473,8 @@ static int linehandle_create(struct gpio_device *gdev, void __user *ip)
 		dev_dbg(&gdev->dev, "registered chardev handle for line %d\n",
 			offset);
 	}
+	/* Let i point at the last handle */
+	i--;
 	lh->numdescs = handlereq.lines;
 
 	fd = anon_inode_getfd("gpio-linehandle",
@@ -486,8 +487,10 @@ static int linehandle_create(struct gpio_device *gdev, void __user *ip)
 	}
 
 	handlereq.fd = fd;
-	if (copy_to_user(ip, &handlereq, sizeof(handlereq)))
-		return -EFAULT;
+	if (copy_to_user(ip, &handlereq, sizeof(handlereq))) {
+		ret = -EFAULT;
+		goto out_free_descs;
+	}
 
 	dev_dbg(&gdev->dev, "registered chardev handle for %d lines\n",
 		lh->numdescs);
@@ -651,7 +654,7 @@ static const struct file_operations lineevent_fileops = {
 #endif
 };
 
-irqreturn_t lineevent_irq_thread(int irq, void *p)
+static irqreturn_t lineevent_irq_thread(int irq, void *p)
 {
 	struct lineevent_state *le = p;
 	struct gpioevent_data ge;
@@ -674,6 +677,8 @@ irqreturn_t lineevent_irq_thread(int irq, void *p)
 	} else if (le->eflags & GPIOEVENT_REQUEST_FALLING_EDGE) {
 		/* Emit high-to-low event */
 		ge.id = GPIOEVENT_EVENT_FALLING_EDGE;
+	} else {
+		return IRQ_NONE;
 	}
 
 	ret = kfifo_put(&le->events, ge);
@@ -780,8 +785,10 @@ static int lineevent_create(struct gpio_device *gdev, void __user *ip)
 	}
 
 	eventreq.fd = fd;
-	if (copy_to_user(ip, &eventreq, sizeof(eventreq)))
-		return -EFAULT;
+	if (copy_to_user(ip, &eventreq, sizeof(eventreq))) {
+		ret = -EFAULT;
+		goto out_free_irq;
+	}
 
 	return 0;
 
@@ -1039,13 +1046,14 @@ int gpiochip_add_data(struct gpio_chip *chip, void *data)
 	if (chip->parent) {
 		gdev->dev.parent = chip->parent;
 		gdev->dev.of_node = chip->parent->of_node;
-	} else {
+	}
+
 #ifdef CONFIG_OF_GPIO
 	/* If the gpiochip has an assigned OF node this takes precedence */
-		if (chip->of_node)
-			gdev->dev.of_node = chip->of_node;
+	if (chip->of_node)
+		gdev->dev.of_node = chip->of_node;
 #endif
-	}
+
 	gdev->id = ida_simple_get(&gpio_ida, 0, 0, GFP_KERNEL);
 	if (gdev->id < 0) {
 		status = gdev->id;
@@ -2824,7 +2832,7 @@ static struct gpio_desc *of_find_gpio(struct device *dev, const char *con_id,
 
 		desc = of_get_named_gpiod_flags(dev->of_node, prop_name, idx,
 						&of_flags);
-		if (!IS_ERR(desc) || (PTR_ERR(desc) == -EPROBE_DEFER))
+		if (!IS_ERR(desc) || (PTR_ERR(desc) != -ENOENT))
 			break;
 	}
 

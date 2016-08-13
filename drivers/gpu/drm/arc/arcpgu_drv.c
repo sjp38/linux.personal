@@ -28,8 +28,7 @@ static void arcpgu_fb_output_poll_changed(struct drm_device *dev)
 {
 	struct arcpgu_drm_private *arcpgu = dev->dev_private;
 
-	if (arcpgu->fbdev)
-		drm_fbdev_cma_hotplug_event(arcpgu->fbdev);
+	drm_fbdev_cma_hotplug_event(arcpgu->fbdev);
 }
 
 static struct drm_mode_config_funcs arcpgu_drm_modecfg_funcs = {
@@ -49,7 +48,7 @@ static void arcpgu_setup_mode_config(struct drm_device *drm)
 	drm->mode_config.funcs = &arcpgu_drm_modecfg_funcs;
 }
 
-int arcpgu_gem_mmap(struct file *filp, struct vm_area_struct *vma)
+static int arcpgu_gem_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	int ret;
 
@@ -104,10 +103,8 @@ static int arcpgu_load(struct drm_device *drm)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	arcpgu->regs = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(arcpgu->regs)) {
-		dev_err(drm->dev, "Could not remap IO mem\n");
+	if (IS_ERR(arcpgu->regs))
 		return PTR_ERR(arcpgu->regs);
-	}
 
 	dev_info(drm->dev, "arc_pgu ID: 0x%x\n",
 		 arc_pgu_read(arcpgu, ARCPGU_REG_ID));
@@ -127,10 +124,11 @@ static int arcpgu_load(struct drm_device *drm)
 	encoder_node = of_parse_phandle(drm->dev->of_node, "encoder-slave", 0);
 	if (encoder_node) {
 		ret = arcpgu_drm_hdmi_init(drm, encoder_node);
+		of_node_put(encoder_node);
 		if (ret < 0)
 			return ret;
 	} else {
-		ret = arcpgu_drm_sim_init(drm, 0);
+		ret = arcpgu_drm_sim_init(drm, NULL);
 		if (ret < 0)
 			return ret;
 	}
@@ -151,7 +149,7 @@ static int arcpgu_load(struct drm_device *drm)
 	return 0;
 }
 
-int arcpgu_unload(struct drm_device *drm)
+static int arcpgu_unload(struct drm_device *drm)
 {
 	struct arcpgu_drm_private *arcpgu = drm->dev_private;
 
@@ -211,14 +209,7 @@ static int arcpgu_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_unload;
 
-	ret = drm_connector_register_all(drm);
-	if (ret)
-		goto err_unregister;
-
 	return 0;
-
-err_unregister:
-	drm_dev_unregister(drm);
 
 err_unload:
 	arcpgu_unload(drm);
@@ -233,7 +224,6 @@ static int arcpgu_remove(struct platform_device *pdev)
 {
 	struct drm_device *drm = platform_get_drvdata(pdev);
 
-	drm_connector_unregister_all(drm);
 	drm_dev_unregister(drm);
 	arcpgu_unload(drm);
 	drm_dev_unref(drm);

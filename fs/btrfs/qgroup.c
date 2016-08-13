@@ -571,7 +571,7 @@ static int add_qgroup_item(struct btrfs_trans_handle *trans,
 	struct extent_buffer *leaf;
 	struct btrfs_key key;
 
-	if (btrfs_test_is_dummy_root(quota_root))
+	if (btrfs_is_testing(quota_root->fs_info))
 		return 0;
 
 	path = btrfs_alloc_path();
@@ -728,7 +728,7 @@ static int update_qgroup_info_item(struct btrfs_trans_handle *trans,
 	int ret;
 	int slot;
 
-	if (btrfs_test_is_dummy_root(root))
+	if (btrfs_is_testing(root->fs_info))
 		return 0;
 
 	key.objectid = 0;
@@ -2196,7 +2196,7 @@ void assert_qgroups_uptodate(struct btrfs_trans_handle *trans)
 {
 	if (list_empty(&trans->qgroup_ref_list) && !trans->delayed_ref_elem.seq)
 		return;
-	btrfs_err(trans->root->fs_info,
+	btrfs_err(trans->fs_info,
 		"qgroups not uptodate in trans handle %p:  list is%s empty, "
 		"seq is %#x.%x",
 		trans, list_empty(&trans->qgroup_ref_list) ? "" : " not",

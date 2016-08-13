@@ -318,17 +318,11 @@ static void pcpu_delegate(struct pcpu *pcpu, void (*func)(void *),
  */
 static int pcpu_set_smt(unsigned int mtid)
 {
-	register unsigned long reg1 asm ("1") = (unsigned long) mtid;
 	int cc;
 
 	if (smp_cpu_mtid == mtid)
 		return 0;
-	asm volatile(
-		"	sigp	%1,0,%2	# sigp set multi-threading\n"
-		"	ipm	%0\n"
-		"	srl	%0,28\n"
-		: "=d" (cc) : "d" (reg1), "K" (SIGP_SET_MULTI_THREADING)
-		: "cc");
+	cc = __pcpu_sigp(0, SIGP_SET_MULTI_THREADING, mtid, NULL);
 	if (cc == 0) {
 		smp_cpu_mtid = mtid;
 		smp_cpu_mt_shift = 0;
@@ -893,7 +887,7 @@ void __init smp_fill_possible_mask(void)
 
 	sclp_max = max(sclp.mtid, sclp.mtid_cp) + 1;
 	sclp_max = min(smp_max_threads, sclp_max);
-	sclp_max = sclp.max_cores * sclp_max ?: nr_cpu_ids;
+	sclp_max = (sclp.max_cores * sclp_max) ?: nr_cpu_ids;
 	possible = setup_possible_cpus ?: nr_cpu_ids;
 	possible = min(possible, sclp_max);
 	for (cpu = 0; cpu < possible && cpu < nr_cpu_ids; cpu++)

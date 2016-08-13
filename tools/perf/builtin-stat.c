@@ -290,8 +290,12 @@ perf_evsel__write_stat_event(struct perf_evsel *counter, u32 cpu, u32 thread,
 static int read_counter(struct perf_evsel *counter)
 {
 	int nthreads = thread_map__nr(evsel_list->threads);
-	int ncpus = perf_evsel__nr_cpus(counter);
-	int cpu, thread;
+	int ncpus, cpu, thread;
+
+	if (target__has_cpu(&target))
+		ncpus = perf_evsel__nr_cpus(counter);
+	else
+		ncpus = 1;
 
 	if (!counter->supported)
 		return -ENOENT;
@@ -327,21 +331,16 @@ static int read_counter(struct perf_evsel *counter)
 	return 0;
 }
 
-static void read_counters(bool close_counters)
+static void read_counters(void)
 {
 	struct perf_evsel *counter;
 
-	evlist__for_each(evsel_list, counter) {
+	evlist__for_each_entry(evsel_list, counter) {
 		if (read_counter(counter))
 			pr_debug("failed to read counter %s\n", counter->name);
 
 		if (perf_stat_process_counter(&stat_config, counter))
 			pr_warning("failed to process counter %s\n", counter->name);
-
-		if (close_counters) {
-			perf_evsel__close_fd(counter, perf_evsel__nr_cpus(counter),
-					     thread_map__nr(evsel_list->threads));
-		}
 	}
 }
 
@@ -349,7 +348,7 @@ static void process_interval(void)
 {
 	struct timespec ts, rs;
 
-	read_counters(false);
+	read_counters();
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	diff_timespec(&rs, &ts, &ref_time);
@@ -374,6 +373,17 @@ static void enable_counters(void)
 	 */
 	if (!target__none(&target) || initial_delay)
 		perf_evlist__enable(evsel_list);
+}
+
+static void disable_counters(void)
+{
+	/*
+	 * If we don't have tracee (attaching to task or cpu), counters may
+	 * still be running. To get accurate group ratios, we must stop groups
+	 * from counting before reading their constituent counters.
+	 */
+	if (!target__none(&target))
+		perf_evlist__disable(evsel_list);
 }
 
 static volatile int workload_exec_errno;
@@ -417,7 +427,7 @@ static int perf_stat_synthesize_config(bool is_pipe)
 	 * Synthesize other events stuff not carried within
 	 * attr event - unit, scale, name
 	 */
-	evlist__for_each(evsel_list, counter) {
+	evlist__for_each_entry(evsel_list, counter) {
 		if (!counter->supported)
 			continue;
 
@@ -550,7 +560,7 @@ static int __run_perf_stat(int argc, const char **argv)
 	if (group)
 		perf_evlist__set_leader(evsel_list);
 
-	evlist__for_each(evsel_list, counter) {
+	evlist__for_each_entry(evsel_list, counter) {
 try_again:
 		if (create_perf_stat_counter(counter) < 0) {
 			/*
@@ -596,7 +606,7 @@ try_again:
 	if (perf_evlist__apply_filters(evsel_list, &counter)) {
 		error("failed to set filter \"%s\" on event %s with %d (%s)\n",
 			counter->filter, perf_evsel__name(counter), errno,
-			strerror_r(errno, msg, sizeof(msg)));
+			str_error_r(errno, msg, sizeof(msg)));
 		return -1;
 	}
 
@@ -637,7 +647,7 @@ try_again:
 		wait(&status);
 
 		if (workload_exec_errno) {
-			const char *emsg = strerror_r(workload_exec_errno, msg, sizeof(msg));
+			const char *emsg = str_error_r(workload_exec_errno, msg, sizeof(msg));
 			pr_err("Workload failed: %s\n", emsg);
 			return -1;
 		}
@@ -653,11 +663,20 @@ try_again:
 		}
 	}
 
+	disable_counters();
+
 	t1 = rdclock();
 
 	update_stats(&walltime_nsecs_stats, t1 - t0);
 
-	read_counters(true);
+	/*
+	 * Closing a group leader splits the group, and as we only disable
+	 * group leaders, results in remaining events becoming enabled. To
+	 * avoid arbitrary skew, we must read all counters before closing any
+	 * group leaders.
+	 */
+	read_counters();
+	perf_evlist__close(evsel_list);
 
 	return WEXITSTATUS(status);
 }
@@ -1134,7 +1153,7 @@ static void aggr_update_shadow(void)
 
 	for (s = 0; s < aggr_map->nr; s++) {
 		id = aggr_map->map[s];
-		evlist__for_each(evsel_list, counter) {
+		evlist__for_each_entry(evsel_list, counter) {
 			val = 0;
 			for (cpu = 0; cpu < perf_evsel__nr_cpus(counter); cpu++) {
 				s2 = aggr_get_id(evsel_list->cpus, cpu);
@@ -1173,7 +1192,7 @@ static void print_aggr(char *prefix)
 
 		id = aggr_map->map[s];
 		first = true;
-		evlist__for_each(evsel_list, counter) {
+		evlist__for_each_entry(evsel_list, counter) {
 			val = ena = run = 0;
 			nr = 0;
 			for (cpu = 0; cpu < perf_evsel__nr_cpus(counter); cpu++) {
@@ -1292,7 +1311,7 @@ static void print_no_aggr_metric(char *prefix)
 
 		if (prefix)
 			fputs(prefix, stat_config.output);
-		evlist__for_each(evsel_list, counter) {
+		evlist__for_each_entry(evsel_list, counter) {
 			if (first) {
 				aggr_printout(counter, cpu, 0);
 				first = false;
@@ -1346,7 +1365,7 @@ static void print_metric_headers(const char *prefix, bool no_indent)
 	}
 
 	/* Print metrics headers only */
-	evlist__for_each(evsel_list, counter) {
+	evlist__for_each_entry(evsel_list, counter) {
 		os.evsel = counter;
 		out.ctx = &os;
 		out.print_metric = print_metric_header;
@@ -1482,11 +1501,11 @@ static void print_counters(struct timespec *ts, int argc, const char **argv)
 		print_aggr(prefix);
 		break;
 	case AGGR_THREAD:
-		evlist__for_each(evsel_list, counter)
+		evlist__for_each_entry(evsel_list, counter)
 			print_aggr_thread(counter, prefix);
 		break;
 	case AGGR_GLOBAL:
-		evlist__for_each(evsel_list, counter)
+		evlist__for_each_entry(evsel_list, counter)
 			print_counter_aggr(counter, prefix);
 		if (metric_only)
 			fputc('\n', stat_config.output);
@@ -1495,7 +1514,7 @@ static void print_counters(struct timespec *ts, int argc, const char **argv)
 		if (metric_only)
 			print_no_aggr_metric(prefix);
 		else {
-			evlist__for_each(evsel_list, counter)
+			evlist__for_each_entry(evsel_list, counter)
 				print_counter(counter, prefix);
 		}
 		break;
@@ -2149,7 +2168,7 @@ static int process_stat_round_event(struct perf_tool *tool __maybe_unused,
 	const char **argv = session->header.env.cmdline_argv;
 	int argc = session->header.env.nr_cmdline;
 
-	evlist__for_each(evsel_list, counter)
+	evlist__for_each_entry(evsel_list, counter)
 		perf_stat_process_counter(&stat_config, counter);
 
 	if (stat_round->type == PERF_STAT_ROUND_TYPE__FINAL)

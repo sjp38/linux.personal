@@ -188,6 +188,7 @@ static bool crb_req_canceled(struct tpm_chip *chip, u8 status)
 }
 
 static const struct tpm_class_ops tpm_crb = {
+	.flags = TPM_OPS_AUTO_STARTUP,
 	.status = crb_status,
 	.recv = crb_recv,
 	.send = crb_send,
@@ -200,7 +201,6 @@ static const struct tpm_class_ops tpm_crb = {
 static int crb_init(struct acpi_device *device, struct crb_priv *priv)
 {
 	struct tpm_chip *chip;
-	int rc;
 
 	chip = tpmm_chip_alloc(&device->dev, &tpm_crb);
 	if (IS_ERR(chip))
@@ -209,14 +209,6 @@ static int crb_init(struct acpi_device *device, struct crb_priv *priv)
 	dev_set_drvdata(&chip->dev, priv);
 	chip->acpi_dev_handle = device->handle;
 	chip->flags = TPM_CHIP_FLAG_TPM2;
-
-	rc = tpm_get_timeouts(chip);
-	if (rc)
-		return rc;
-
-	rc = tpm2_do_selftest(chip);
-	if (rc)
-		return rc;
 
 	return tpm_chip_register(chip);
 }
@@ -245,7 +237,7 @@ static void __iomem *crb_map_res(struct device *dev, struct crb_priv *priv,
 
 	/* Detect a 64 bit address on a 32 bit system */
 	if (start != new_res.start)
-		return ERR_PTR(-EINVAL);
+		return (void __iomem *) ERR_PTR(-EINVAL);
 
 	if (!resource_contains(io_res, &new_res))
 		return devm_ioremap_resource(dev, &new_res);

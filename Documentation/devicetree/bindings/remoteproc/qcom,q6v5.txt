@@ -96,7 +96,7 @@ Hexagon, as it is found on MSM8974 boards.
 		compatible = "qcom,q6v5-pil";
 		reg = <0xfc880000 0x100>,
 		      <0xfc820000 0x020>;
-		reg-names = "qdsp6_base", "rmb_base";
+		reg-names = "qdsp6", "rmb";
 
 		interrupts-extended = <&intc 0 24 1>,
 				      <&modem_smp2p_in 0 0>,
@@ -135,4 +135,3 @@ Hexagon, as it is found on MSM8974 boards.
 			memory-region = <&mpss_region>;
 		};
 	};
-

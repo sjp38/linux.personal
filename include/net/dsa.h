@@ -32,6 +32,8 @@ enum dsa_tag_protocol {
 #define DSA_MAX_SWITCHES	4
 #define DSA_MAX_PORTS		12
 
+#define DSA_RTABLE_NONE		-1
+
 struct dsa_chip_data {
 	/*
 	 * How to access the switch configuration registers.
@@ -139,6 +141,7 @@ struct dsa_switch_tree {
 struct dsa_port {
 	struct net_device	*netdev;
 	struct device_node	*dn;
+	unsigned int		ageing_time;
 };
 
 struct dsa_switch {
@@ -327,6 +330,7 @@ struct dsa_switch_driver {
 	/*
 	 * Bridge integration
 	 */
+	int	(*set_ageing_time)(struct dsa_switch *ds, unsigned int msecs);
 	int	(*port_bridge_join)(struct dsa_switch *ds, int port,
 				    struct net_device *bridge);
 	void	(*port_bridge_leave)(struct dsa_switch *ds, int port);

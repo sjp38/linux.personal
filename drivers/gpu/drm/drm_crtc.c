@@ -39,6 +39,7 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_modeset_lock.h>
 #include <drm/drm_atomic.h>
+#include <drm/drm_auth.h>
 
 #include "drm_crtc_internal.h"
 #include "drm_internal.h"
@@ -395,6 +396,51 @@ void drm_mode_object_reference(struct drm_mode_object *obj)
 }
 EXPORT_SYMBOL(drm_mode_object_reference);
 
+/**
+ * drm_crtc_force_disable - Forcibly turn off a CRTC
+ * @crtc: CRTC to turn off
+ *
+ * Returns:
+ * Zero on success, error code on failure.
+ */
+int drm_crtc_force_disable(struct drm_crtc *crtc)
+{
+	struct drm_mode_set set = {
+		.crtc = crtc,
+	};
+
+	return drm_mode_set_config_internal(&set);
+}
+EXPORT_SYMBOL(drm_crtc_force_disable);
+
+/**
+ * drm_crtc_force_disable_all - Forcibly turn off all enabled CRTCs
+ * @dev: DRM device whose CRTCs to turn off
+ *
+ * Drivers may want to call this on unload to ensure that all displays are
+ * unlit and the GPU is in a consistent, low power state. Takes modeset locks.
+ *
+ * Returns:
+ * Zero on success, error code on failure.
+ */
+int drm_crtc_force_disable_all(struct drm_device *dev)
+{
+	struct drm_crtc *crtc;
+	int ret = 0;
+
+	drm_modeset_lock_all(dev);
+	drm_for_each_crtc(crtc, dev)
+		if (crtc->enabled) {
+			ret = drm_crtc_force_disable(crtc);
+			if (ret)
+				goto out;
+		}
+out:
+	drm_modeset_unlock_all(dev);
+	return ret;
+}
+EXPORT_SYMBOL(drm_crtc_force_disable_all);
+
 static void drm_framebuffer_free(struct kref *kref)
 {
 	struct drm_framebuffer *fb =
@@ -543,8 +589,6 @@ void drm_framebuffer_remove(struct drm_framebuffer *fb)
 	struct drm_device *dev;
 	struct drm_crtc *crtc;
 	struct drm_plane *plane;
-	struct drm_mode_set set;
-	int ret;
 
 	if (!fb)
 		return;
@@ -574,11 +618,7 @@ void drm_framebuffer_remove(struct drm_framebuffer *fb)
 		drm_for_each_crtc(crtc, dev) {
 			if (crtc->primary->fb == fb) {
 				/* should turn off the crtc */
-				memset(&set, 0, sizeof(struct drm_mode_set));
-				set.crtc = crtc;
-				set.fb = NULL;
-				ret = drm_mode_set_config_internal(&set);
-				if (ret)
+				if (drm_crtc_force_disable(crtc))
 					DRM_ERROR("failed to reset crtc %p when fb was deleted\n", crtc);
 			}
 		}
@@ -606,6 +646,31 @@ static unsigned int drm_num_crtcs(struct drm_device *dev)
 	}
 
 	return num;
+}
+
+static int drm_crtc_register_all(struct drm_device *dev)
+{
+	struct drm_crtc *crtc;
+	int ret = 0;
+
+	drm_for_each_crtc(crtc, dev) {
+		if (crtc->funcs->late_register)
+			ret = crtc->funcs->late_register(crtc);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static void drm_crtc_unregister_all(struct drm_device *dev)
+{
+	struct drm_crtc *crtc;
+
+	drm_for_each_crtc(crtc, dev) {
+		if (crtc->funcs->early_unregister)
+			crtc->funcs->early_unregister(crtc);
+	}
 }
 
 /**
@@ -863,11 +928,11 @@ int drm_connector_init(struct drm_device *dev,
 	connector->dev = dev;
 	connector->funcs = funcs;
 
-	connector->connector_id = ida_simple_get(&config->connector_ida, 0, 0, GFP_KERNEL);
-	if (connector->connector_id < 0) {
-		ret = connector->connector_id;
+	ret = ida_simple_get(&config->connector_ida, 0, 0, GFP_KERNEL);
+	if (ret < 0)
 		goto out_put;
-	}
+	connector->index = ret;
+	ret = 0;
 
 	connector->connector_type = connector_type;
 	connector->connector_type_id =
@@ -915,7 +980,7 @@ out_put_type_id:
 		ida_remove(connector_ida, connector->connector_type_id);
 out_put_id:
 	if (ret)
-		ida_remove(&config->connector_ida, connector->connector_id);
+		ida_remove(&config->connector_ida, connector->index);
 out_put:
 	if (ret)
 		drm_mode_object_unregister(dev, &connector->base);
@@ -938,6 +1003,12 @@ void drm_connector_cleanup(struct drm_connector *connector)
 	struct drm_device *dev = connector->dev;
 	struct drm_display_mode *mode, *t;
 
+	/* The connector should have been removed from userspace long before
+	 * it is finally destroyed.
+	 */
+	if (WARN_ON(connector->registered))
+		drm_connector_unregister(connector);
+
 	if (connector->tile_group) {
 		drm_mode_put_tile_group(dev, connector->tile_group);
 		connector->tile_group = NULL;
@@ -953,7 +1024,7 @@ void drm_connector_cleanup(struct drm_connector *connector)
 		   connector->connector_type_id);
 
 	ida_remove(&dev->mode_config.connector_ida,
-		   connector->connector_id);
+		   connector->index);
 
 	kfree(connector->display_info.bus_formats);
 	drm_mode_object_unregister(dev, &connector->base);
@@ -984,19 +1055,34 @@ int drm_connector_register(struct drm_connector *connector)
 {
 	int ret;
 
+	if (connector->registered)
+		return 0;
+
 	ret = drm_sysfs_connector_add(connector);
 	if (ret)
 		return ret;
 
 	ret = drm_debugfs_connector_add(connector);
 	if (ret) {
-		drm_sysfs_connector_remove(connector);
-		return ret;
+		goto err_sysfs;
+	}
+
+	if (connector->funcs->late_register) {
+		ret = connector->funcs->late_register(connector);
+		if (ret)
+			goto err_debugfs;
 	}
 
 	drm_mode_object_register(connector->dev, &connector->base);
 
+	connector->registered = true;
 	return 0;
+
+err_debugfs:
+	drm_debugfs_connector_remove(connector);
+err_sysfs:
+	drm_sysfs_connector_remove(connector);
+	return ret;
 }
 EXPORT_SYMBOL(drm_connector_register);
 
@@ -1008,41 +1094,40 @@ EXPORT_SYMBOL(drm_connector_register);
  */
 void drm_connector_unregister(struct drm_connector *connector)
 {
+	if (!connector->registered)
+		return;
+
+	if (connector->funcs->early_unregister)
+		connector->funcs->early_unregister(connector);
+
 	drm_sysfs_connector_remove(connector);
 	drm_debugfs_connector_remove(connector);
+
+	connector->registered = false;
 }
 EXPORT_SYMBOL(drm_connector_unregister);
 
-/**
- * drm_connector_register_all - register all connectors
- * @dev: drm device
- *
- * This function registers all connectors in sysfs and other places so that
- * userspace can start to access them. Drivers can call it after calling
- * drm_dev_register() to complete the device registration, if they don't call
- * drm_connector_register() on each connector individually.
- *
- * When a device is unplugged and should be removed from userspace access,
- * call drm_connector_unregister_all(), which is the inverse of this
- * function.
- *
- * Returns:
- * Zero on success, error code on failure.
- */
-int drm_connector_register_all(struct drm_device *dev)
+static void drm_connector_unregister_all(struct drm_device *dev)
+{
+	struct drm_connector *connector;
+
+	/* FIXME: taking the mode config mutex ends up in a clash with sysfs */
+	list_for_each_entry(connector, &dev->mode_config.connector_list, head)
+		drm_connector_unregister(connector);
+}
+
+static int drm_connector_register_all(struct drm_device *dev)
 {
 	struct drm_connector *connector;
 	int ret;
 
-	mutex_lock(&dev->mode_config.mutex);
-
-	drm_for_each_connector(connector, dev) {
+	/* FIXME: taking the mode config mutex ends up in a clash with
+	 * fbcon/backlight registration */
+	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
 		ret = drm_connector_register(connector);
 		if (ret)
 			goto err;
 	}
-
-	mutex_unlock(&dev->mode_config.mutex);
 
 	return 0;
 
@@ -1051,27 +1136,31 @@ err:
 	drm_connector_unregister_all(dev);
 	return ret;
 }
-EXPORT_SYMBOL(drm_connector_register_all);
 
-/**
- * drm_connector_unregister_all - unregister connector userspace interfaces
- * @dev: drm device
- *
- * This functions unregisters all connectors from sysfs and other places so
- * that userspace can no longer access them. Drivers should call this as the
- * first step tearing down the device instace, or when the underlying
- * physical device disappeared (e.g. USB unplug), right before calling
- * drm_dev_unregister().
- */
-void drm_connector_unregister_all(struct drm_device *dev)
+static int drm_encoder_register_all(struct drm_device *dev)
 {
-	struct drm_connector *connector;
+	struct drm_encoder *encoder;
+	int ret = 0;
 
-	/* FIXME: taking the mode config mutex ends up in a clash with sysfs */
-	list_for_each_entry(connector, &dev->mode_config.connector_list, head)
-		drm_connector_unregister(connector);
+	drm_for_each_encoder(encoder, dev) {
+		if (encoder->funcs->late_register)
+			ret = encoder->funcs->late_register(encoder);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
-EXPORT_SYMBOL(drm_connector_unregister_all);
+
+static void drm_encoder_unregister_all(struct drm_device *dev)
+{
+	struct drm_encoder *encoder;
+
+	drm_for_each_encoder(encoder, dev) {
+		if (encoder->funcs->early_unregister)
+			encoder->funcs->early_unregister(encoder);
+	}
+}
 
 /**
  * drm_encoder_init - Init a preallocated encoder
@@ -1261,6 +1350,31 @@ int drm_universal_plane_init(struct drm_device *dev, struct drm_plane *plane,
 }
 EXPORT_SYMBOL(drm_universal_plane_init);
 
+static int drm_plane_register_all(struct drm_device *dev)
+{
+	struct drm_plane *plane;
+	int ret = 0;
+
+	drm_for_each_plane(plane, dev) {
+		if (plane->funcs->late_register)
+			ret = plane->funcs->late_register(plane);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static void drm_plane_unregister_all(struct drm_device *dev)
+{
+	struct drm_plane *plane;
+
+	drm_for_each_plane(plane, dev) {
+		if (plane->funcs->early_unregister)
+			plane->funcs->early_unregister(plane);
+	}
+}
+
 /**
  * drm_plane_init - Initialize a legacy plane
  * @dev: DRM device
@@ -1382,6 +1496,46 @@ void drm_plane_force_disable(struct drm_plane *plane)
 	plane->crtc = NULL;
 }
 EXPORT_SYMBOL(drm_plane_force_disable);
+
+int drm_modeset_register_all(struct drm_device *dev)
+{
+	int ret;
+
+	ret = drm_plane_register_all(dev);
+	if (ret)
+		goto err_plane;
+
+	ret = drm_crtc_register_all(dev);
+	if  (ret)
+		goto err_crtc;
+
+	ret = drm_encoder_register_all(dev);
+	if (ret)
+		goto err_encoder;
+
+	ret = drm_connector_register_all(dev);
+	if (ret)
+		goto err_connector;
+
+	return 0;
+
+err_connector:
+	drm_encoder_unregister_all(dev);
+err_encoder:
+	drm_crtc_unregister_all(dev);
+err_crtc:
+	drm_plane_unregister_all(dev);
+err_plane:
+	return ret;
+}
+
+void drm_modeset_unregister_all(struct drm_device *dev)
+{
+	drm_connector_unregister_all(dev);
+	drm_encoder_unregister_all(dev);
+	drm_crtc_unregister_all(dev);
+	drm_plane_unregister_all(dev);
+}
 
 static int drm_mode_create_standard_properties(struct drm_device *dev)
 {
@@ -3499,7 +3653,7 @@ int drm_mode_getfb(struct drm_device *dev,
 	r->bpp = fb->bits_per_pixel;
 	r->pitch = fb->pitches[0];
 	if (fb->funcs->create_handle) {
-		if (file_priv->is_master || capable(CAP_SYS_ADMIN) ||
+		if (drm_is_current_master(file_priv) || capable(CAP_SYS_ADMIN) ||
 		    drm_is_control_client(file_priv)) {
 			ret = fb->funcs->create_handle(fb, file_priv,
 						       &r->handle);
@@ -3654,6 +3808,13 @@ void drm_fb_release(struct drm_file *priv)
 		flush_work(&arg.work);
 		destroy_work_on_stack(&arg.work);
 	}
+}
+
+static bool drm_property_type_valid(struct drm_property *property)
+{
+	if (property->flags & DRM_MODE_PROP_EXTENDED_TYPE)
+		return !(property->flags & DRM_MODE_PROP_LEGACY_TYPE);
+	return !!(property->flags & DRM_MODE_PROP_LEGACY_TYPE);
 }
 
 /**

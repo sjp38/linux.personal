@@ -19,6 +19,7 @@
 
 #include <asm/cacheflush.h>
 #include <linux/ctype.h>
+#include <linux/delay.h>
 #include <linux/edac.h>
 #include <linux/genalloc.h>
 #include <linux/interrupt.h>
@@ -550,10 +551,10 @@ module_platform_driver(altr_edac_driver);
  * trigger testing are different for each memory.
  */
 
-const struct edac_device_prv_data ocramecc_data;
-const struct edac_device_prv_data l2ecc_data;
-const struct edac_device_prv_data a10_ocramecc_data;
-const struct edac_device_prv_data a10_l2ecc_data;
+static const struct edac_device_prv_data ocramecc_data;
+static const struct edac_device_prv_data l2ecc_data;
+static const struct edac_device_prv_data a10_ocramecc_data;
+static const struct edac_device_prv_data a10_l2ecc_data;
 
 static irqreturn_t altr_edac_device_handler(int irq, void *dev_id)
 {
@@ -825,16 +826,16 @@ static struct platform_driver altr_edac_device_driver = {
 };
 module_platform_driver(altr_edac_device_driver);
 
-/*********************** OCRAM EDAC Device Functions *********************/
+/******************* Arria10 Device ECC Shared Functions *****************/
 
-#ifdef CONFIG_EDAC_ALTERA_OCRAM
 /*
  *  Test for memory's ECC dependencies upon entry because platform specific
  *  startup should have initialized the memory and enabled the ECC.
  *  Can't turn on ECC here because accessing un-initialized memory will
  *  cause CE/UE errors possibly causing an ABORT.
  */
-static int altr_check_ecc_deps(struct altr_edac_device_dev *device)
+static int __maybe_unused
+altr_check_ecc_deps(struct altr_edac_device_dev *device)
 {
 	void __iomem  *base = device->base;
 	const struct edac_device_prv_data *prv = device->data;
@@ -847,6 +848,227 @@ static int altr_check_ecc_deps(struct altr_edac_device_dev *device)
 		    device->edac_dev_name);
 	return -ENODEV;
 }
+
+static irqreturn_t __maybe_unused altr_edac_a10_ecc_irq(int irq, void *dev_id)
+{
+	struct altr_edac_device_dev *dci = dev_id;
+	void __iomem  *base = dci->base;
+
+	if (irq == dci->sb_irq) {
+		writel(ALTR_A10_ECC_SERRPENA,
+		       base + ALTR_A10_ECC_INTSTAT_OFST);
+		edac_device_handle_ce(dci->edac_dev, 0, 0, dci->edac_dev_name);
+
+		return IRQ_HANDLED;
+	} else if (irq == dci->db_irq) {
+		writel(ALTR_A10_ECC_DERRPENA,
+		       base + ALTR_A10_ECC_INTSTAT_OFST);
+		edac_device_handle_ue(dci->edac_dev, 0, 0, dci->edac_dev_name);
+		if (dci->data->panic)
+			panic("\nEDAC:ECC_DEVICE[Uncorrectable errors]\n");
+
+		return IRQ_HANDLED;
+	}
+
+	WARN_ON(1);
+
+	return IRQ_NONE;
+}
+
+/******************* Arria10 Memory Buffer Functions *********************/
+
+static inline int a10_get_irq_mask(struct device_node *np)
+{
+	int irq;
+	const u32 *handle = of_get_property(np, "interrupts", NULL);
+
+	if (!handle)
+		return -ENODEV;
+	irq = be32_to_cpup(handle);
+	return irq;
+}
+
+static inline void ecc_set_bits(u32 bit_mask, void __iomem *ioaddr)
+{
+	u32 value = readl(ioaddr);
+
+	value |= bit_mask;
+	writel(value, ioaddr);
+}
+
+static inline void ecc_clear_bits(u32 bit_mask, void __iomem *ioaddr)
+{
+	u32 value = readl(ioaddr);
+
+	value &= ~bit_mask;
+	writel(value, ioaddr);
+}
+
+static inline int ecc_test_bits(u32 bit_mask, void __iomem *ioaddr)
+{
+	u32 value = readl(ioaddr);
+
+	return (value & bit_mask) ? 1 : 0;
+}
+
+/*
+ * This function uses the memory initialization block in the Arria10 ECC
+ * controller to initialize/clear the entire memory data and ECC data.
+ */
+static int __maybe_unused altr_init_memory_port(void __iomem *ioaddr, int port)
+{
+	int limit = ALTR_A10_ECC_INIT_WATCHDOG_10US;
+	u32 init_mask, stat_mask, clear_mask;
+	int ret = 0;
+
+	if (port) {
+		init_mask = ALTR_A10_ECC_INITB;
+		stat_mask = ALTR_A10_ECC_INITCOMPLETEB;
+		clear_mask = ALTR_A10_ECC_ERRPENB_MASK;
+	} else {
+		init_mask = ALTR_A10_ECC_INITA;
+		stat_mask = ALTR_A10_ECC_INITCOMPLETEA;
+		clear_mask = ALTR_A10_ECC_ERRPENA_MASK;
+	}
+
+	ecc_set_bits(init_mask, (ioaddr + ALTR_A10_ECC_CTRL_OFST));
+	while (limit--) {
+		if (ecc_test_bits(stat_mask,
+				  (ioaddr + ALTR_A10_ECC_INITSTAT_OFST)))
+			break;
+		udelay(1);
+	}
+	if (limit < 0)
+		ret = -EBUSY;
+
+	/* Clear any pending ECC interrupts */
+	writel(clear_mask, (ioaddr + ALTR_A10_ECC_INTSTAT_OFST));
+
+	return ret;
+}
+
+static __init int __maybe_unused
+altr_init_a10_ecc_block(struct device_node *np, u32 irq_mask,
+			u32 ecc_ctrl_en_mask, bool dual_port)
+{
+	int ret = 0;
+	void __iomem *ecc_block_base;
+	struct regmap *ecc_mgr_map;
+	char *ecc_name;
+	struct device_node *np_eccmgr;
+
+	ecc_name = (char *)np->name;
+
+	/* Get the ECC Manager - parent of the device EDACs */
+	np_eccmgr = of_get_parent(np);
+	ecc_mgr_map = syscon_regmap_lookup_by_phandle(np_eccmgr,
+						      "altr,sysmgr-syscon");
+	of_node_put(np_eccmgr);
+	if (IS_ERR(ecc_mgr_map)) {
+		edac_printk(KERN_ERR, EDAC_DEVICE,
+			    "Unable to get syscon altr,sysmgr-syscon\n");
+		return -ENODEV;
+	}
+
+	/* Map the ECC Block */
+	ecc_block_base = of_iomap(np, 0);
+	if (!ecc_block_base) {
+		edac_printk(KERN_ERR, EDAC_DEVICE,
+			    "Unable to map %s ECC block\n", ecc_name);
+		return -ENODEV;
+	}
+
+	/* Disable ECC */
+	regmap_write(ecc_mgr_map, A10_SYSMGR_ECC_INTMASK_SET_OFST, irq_mask);
+	writel(ALTR_A10_ECC_SERRINTEN,
+	       (ecc_block_base + ALTR_A10_ECC_ERRINTENR_OFST));
+	ecc_clear_bits(ecc_ctrl_en_mask,
+		       (ecc_block_base + ALTR_A10_ECC_CTRL_OFST));
+	/* Ensure all writes complete */
+	wmb();
+	/* Use HW initialization block to initialize memory for ECC */
+	ret = altr_init_memory_port(ecc_block_base, 0);
+	if (ret) {
+		edac_printk(KERN_ERR, EDAC_DEVICE,
+			    "ECC: cannot init %s PORTA memory\n", ecc_name);
+		goto out;
+	}
+
+	if (dual_port) {
+		ret = altr_init_memory_port(ecc_block_base, 1);
+		if (ret) {
+			edac_printk(KERN_ERR, EDAC_DEVICE,
+				    "ECC: cannot init %s PORTB memory\n",
+				    ecc_name);
+			goto out;
+		}
+	}
+
+	/* Interrupt mode set to every SBERR */
+	regmap_write(ecc_mgr_map, ALTR_A10_ECC_INTMODE_OFST,
+		     ALTR_A10_ECC_INTMODE);
+	/* Enable ECC */
+	ecc_set_bits(ecc_ctrl_en_mask, (ecc_block_base +
+					ALTR_A10_ECC_CTRL_OFST));
+	writel(ALTR_A10_ECC_SERRINTEN,
+	       (ecc_block_base + ALTR_A10_ECC_ERRINTENS_OFST));
+	regmap_write(ecc_mgr_map, A10_SYSMGR_ECC_INTMASK_CLR_OFST, irq_mask);
+	/* Ensure all writes complete */
+	wmb();
+out:
+	iounmap(ecc_block_base);
+	return ret;
+}
+
+static int validate_parent_available(struct device_node *np);
+static const struct of_device_id altr_edac_a10_device_of_match[];
+static int __init __maybe_unused altr_init_a10_ecc_device_type(char *compat)
+{
+	int irq;
+	struct device_node *child, *np = of_find_compatible_node(NULL, NULL,
+					"altr,socfpga-a10-ecc-manager");
+	if (!np) {
+		edac_printk(KERN_ERR, EDAC_DEVICE, "ECC Manager not found\n");
+		return -ENODEV;
+	}
+
+	for_each_child_of_node(np, child) {
+		const struct of_device_id *pdev_id;
+		const struct edac_device_prv_data *prv;
+
+		if (!of_device_is_available(child))
+			continue;
+		if (!of_device_is_compatible(child, compat))
+			continue;
+
+		if (validate_parent_available(child))
+			continue;
+
+		irq = a10_get_irq_mask(child);
+		if (irq < 0)
+			continue;
+
+		/* Get matching node and check for valid result */
+		pdev_id = of_match_node(altr_edac_a10_device_of_match, child);
+		if (IS_ERR_OR_NULL(pdev_id))
+			continue;
+
+		/* Validate private data pointer before dereferencing */
+		prv = pdev_id->data;
+		if (!prv)
+			continue;
+
+		altr_init_a10_ecc_block(child, BIT(irq),
+					prv->ecc_enable_mask, 0);
+	}
+
+	of_node_put(np);
+	return 0;
+}
+
+/*********************** OCRAM EDAC Device Functions *********************/
+
+#ifdef CONFIG_EDAC_ALTERA_OCRAM
 
 static void *ocram_alloc_mem(size_t size, void **other)
 {
@@ -882,32 +1104,7 @@ static void ocram_free_mem(void *p, size_t size, void *other)
 	gen_pool_free((struct gen_pool *)other, (u32)p, size);
 }
 
-static irqreturn_t altr_edac_a10_ecc_irq(int irq, void *dev_id)
-{
-	struct altr_edac_device_dev *dci = dev_id;
-	void __iomem  *base = dci->base;
-
-	if (irq == dci->sb_irq) {
-		writel(ALTR_A10_ECC_SERRPENA,
-		       base + ALTR_A10_ECC_INTSTAT_OFST);
-		edac_device_handle_ce(dci->edac_dev, 0, 0, dci->edac_dev_name);
-
-		return IRQ_HANDLED;
-	} else if (irq == dci->db_irq) {
-		writel(ALTR_A10_ECC_DERRPENA,
-		       base + ALTR_A10_ECC_INTSTAT_OFST);
-		edac_device_handle_ue(dci->edac_dev, 0, 0, dci->edac_dev_name);
-		panic("\nEDAC:ECC_DEVICE[Uncorrectable errors]\n");
-
-		return IRQ_HANDLED;
-	}
-
-	WARN_ON(1);
-
-	return IRQ_NONE;
-}
-
-const struct edac_device_prv_data ocramecc_data = {
+static const struct edac_device_prv_data ocramecc_data = {
 	.setup = altr_check_ecc_deps,
 	.ce_clear_mask = (ALTR_OCR_ECC_EN | ALTR_OCR_ECC_SERR),
 	.ue_clear_mask = (ALTR_OCR_ECC_EN | ALTR_OCR_ECC_DERR),
@@ -923,7 +1120,7 @@ const struct edac_device_prv_data ocramecc_data = {
 	.inject_fops = &altr_edac_device_inject_fops,
 };
 
-const struct edac_device_prv_data a10_ocramecc_data = {
+static const struct edac_device_prv_data a10_ocramecc_data = {
 	.setup = altr_check_ecc_deps,
 	.ce_clear_mask = ALTR_A10_ECC_SERRPENA,
 	.ue_clear_mask = ALTR_A10_ECC_DERRPENA,
@@ -936,6 +1133,12 @@ const struct edac_device_prv_data a10_ocramecc_data = {
 	.set_err_ofst = ALTR_A10_ECC_INTTEST_OFST,
 	.ecc_irq_handler = altr_edac_a10_ecc_irq,
 	.inject_fops = &altr_edac_a10_device_inject_fops,
+	/*
+	 * OCRAM panic on uncorrectable error because sleep/resume
+	 * functions and FPGA contents are stored in OCRAM. Prefer
+	 * a kernel panic over executing/loading corrupted data.
+	 */
+	.panic = true,
 };
 
 #endif	/* CONFIG_EDAC_ALTERA_OCRAM */
@@ -1021,7 +1224,7 @@ static irqreturn_t altr_edac_a10_l2_irq(int irq, void *dev_id)
 	return IRQ_NONE;
 }
 
-const struct edac_device_prv_data l2ecc_data = {
+static const struct edac_device_prv_data l2ecc_data = {
 	.setup = altr_l2_check_deps,
 	.ce_clear_mask = 0,
 	.ue_clear_mask = 0,
@@ -1036,7 +1239,7 @@ const struct edac_device_prv_data l2ecc_data = {
 	.inject_fops = &altr_edac_device_inject_fops,
 };
 
-const struct edac_device_prv_data a10_l2ecc_data = {
+static const struct edac_device_prv_data a10_l2ecc_data = {
 	.setup = altr_l2_check_deps,
 	.ce_clear_mask = ALTR_A10_L2_ECC_SERR_CLR,
 	.ue_clear_mask = ALTR_A10_L2_ECC_MERR_CLR,
@@ -1055,6 +1258,33 @@ const struct edac_device_prv_data a10_l2ecc_data = {
 
 #endif	/* CONFIG_EDAC_ALTERA_L2C */
 
+/********************* Ethernet Device Functions ********************/
+
+#ifdef CONFIG_EDAC_ALTERA_ETHERNET
+
+static const struct edac_device_prv_data a10_enetecc_data = {
+	.setup = altr_check_ecc_deps,
+	.ce_clear_mask = ALTR_A10_ECC_SERRPENA,
+	.ue_clear_mask = ALTR_A10_ECC_DERRPENA,
+	.dbgfs_name = "altr_trigger",
+	.ecc_enable_mask = ALTR_A10_COMMON_ECC_EN_CTL,
+	.ecc_en_ofst = ALTR_A10_ECC_CTRL_OFST,
+	.ce_set_mask = ALTR_A10_ECC_TSERRA,
+	.ue_set_mask = ALTR_A10_ECC_TDERRA,
+	.set_err_ofst = ALTR_A10_ECC_INTTEST_OFST,
+	.ecc_irq_handler = altr_edac_a10_ecc_irq,
+	.inject_fops = &altr_edac_a10_device_inject_fops,
+};
+
+static int __init socfpga_init_ethernet_ecc(void)
+{
+	return altr_init_a10_ecc_device_type("altr,socfpga-eth-mac-ecc");
+}
+
+early_initcall(socfpga_init_ethernet_ecc);
+
+#endif	/* CONFIG_EDAC_ALTERA_ETHERNET */
+
 /********************* Arria10 EDAC Device Functions *************************/
 static const struct of_device_id altr_edac_a10_device_of_match[] = {
 #ifdef CONFIG_EDAC_ALTERA_L2C
@@ -1063,6 +1293,10 @@ static const struct of_device_id altr_edac_a10_device_of_match[] = {
 #ifdef CONFIG_EDAC_ALTERA_OCRAM
 	{ .compatible = "altr,socfpga-a10-ocram-ecc",
 	  .data = &a10_ocramecc_data },
+#endif
+#ifdef CONFIG_EDAC_ALTERA_ETHERNET
+	{ .compatible = "altr,socfpga-eth-mac-ecc",
+	  .data = &a10_enetecc_data },
 #endif
 	{},
 };
@@ -1125,6 +1359,20 @@ static void altr_edac_a10_irq_handler(struct irq_desc *desc)
 	chained_irq_exit(chip, desc);
 }
 
+static int validate_parent_available(struct device_node *np)
+{
+	struct device_node *parent;
+	int ret = 0;
+
+	/* Ensure parent device is enabled if parent node exists */
+	parent = of_parse_phandle(np, "altr,ecc-parent", 0);
+	if (parent && !of_device_is_available(parent))
+		ret = -ENODEV;
+
+	of_node_put(parent);
+	return ret;
+}
+
 static int altr_edac_a10_device_add(struct altr_arria10_edac *edac,
 				    struct device_node *np)
 {
@@ -1144,6 +1392,9 @@ static int altr_edac_a10_device_add(struct altr_arria10_edac *edac,
 	/* Get driver specific data for this EDAC device */
 	prv = pdev_id->data;
 	if (IS_ERR_OR_NULL(prv))
+		return -ENODEV;
+
+	if (validate_parent_available(np))
 		return -ENODEV;
 
 	if (!devres_open_group(edac->dev, altr_edac_a10_device_add, GFP_KERNEL))
@@ -1335,8 +1586,10 @@ static int altr_edac_a10_probe(struct platform_device *pdev)
 			continue;
 		if (of_device_is_compatible(child, "altr,socfpga-a10-l2-ecc"))
 			altr_edac_a10_device_add(edac, child);
-		else if (of_device_is_compatible(child,
-						 "altr,socfpga-a10-ocram-ecc"))
+		else if ((of_device_is_compatible(child,
+					"altr,socfpga-a10-ocram-ecc")) ||
+			 (of_device_is_compatible(child,
+					"altr,socfpga-eth-mac-ecc")))
 			altr_edac_a10_device_add(edac, child);
 		else if (of_device_is_compatible(child,
 						 "altr,sdram-edac-a10"))

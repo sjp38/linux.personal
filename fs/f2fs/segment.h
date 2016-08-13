@@ -16,6 +16,7 @@
 #define NULL_SECNO			((unsigned int)(~0))
 
 #define DEF_RECLAIM_PREFREE_SEGMENTS	5	/* 5% over total segments */
+#define DEF_MAX_RECLAIM_PREFREE_SEGMENTS	4096	/* 8GB in maximum */
 
 /* L: Logical segment # in volume, R: Relative segment # in main area */
 #define GET_L2R_SEGNO(free_i, segno)	(segno - free_i->start_segno)
@@ -715,9 +716,9 @@ static inline int nr_pages_to_skip(struct f2fs_sb_info *sbi, int type)
 	if (type == DATA)
 		return sbi->blocks_per_seg;
 	else if (type == NODE)
-		return 3 * sbi->blocks_per_seg;
+		return 8 * sbi->blocks_per_seg;
 	else if (type == META)
-		return MAX_BIO_BLOCKS(sbi);
+		return 8 * MAX_BIO_BLOCKS(sbi);
 	else
 		return 0;
 }
@@ -736,7 +737,7 @@ static inline long nr_pages_to_write(struct f2fs_sb_info *sbi, int type,
 	nr_to_write = wbc->nr_to_write;
 
 	if (type == NODE)
-		desired = 3 * max_hw_blocks(sbi);
+		desired = 2 * max_hw_blocks(sbi);
 	else
 		desired = MAX_BIO_BLOCKS(sbi);
 

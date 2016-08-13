@@ -7,8 +7,10 @@ af-rxrpc-y := \
 	call_accept.o \
 	call_event.o \
 	call_object.o \
+	conn_client.o \
 	conn_event.o \
 	conn_object.o \
+	conn_service.o \
 	input.o \
 	insecure.o \
 	key.o \
@@ -21,7 +23,6 @@ af-rxrpc-y := \
 	recvmsg.o \
 	security.o \
 	skbuff.o \
-	transport.o \
 	utils.o
 
 af-rxrpc-$(CONFIG_PROC_FS) += proc.o

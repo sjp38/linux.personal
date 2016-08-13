@@ -21,7 +21,6 @@
 #include "wmm.h"
 #include "cfg80211.h"
 #include "11n.h"
-#include "sdio.h"
 
 #define VERSION	"1.0"
 
@@ -515,7 +514,6 @@ static void mwifiex_fw_dpc(const struct firmware *firmware, void *context)
 	struct semaphore *sem = adapter->card_sem;
 	bool init_failed = false;
 	struct wireless_dev *wdev;
-	struct sdio_mmc_card *card = adapter->card;
 
 	if (!firmware) {
 		mwifiex_dbg(adapter, ERROR,
@@ -531,11 +529,7 @@ static void mwifiex_fw_dpc(const struct firmware *firmware, void *context)
 	if (adapter->if_ops.dnld_fw) {
 		ret = adapter->if_ops.dnld_fw(adapter, &fw);
 	} else {
-		if (adapter->iface_type == MWIFIEX_SDIO)
-			sdio_claim_host(card->func);
 		ret = mwifiex_dnld_fw(adapter, &fw);
-		if (adapter->iface_type == MWIFIEX_SDIO)
-			sdio_release_host(card->func);
 	}
 
 	if (ret == -1)
@@ -703,9 +697,13 @@ mwifiex_close(struct net_device *dev)
 	struct mwifiex_private *priv = mwifiex_netdev_get_priv(dev);
 
 	if (priv->scan_request) {
+		struct cfg80211_scan_info info = {
+			.aborted = true,
+		};
+
 		mwifiex_dbg(priv->adapter, INFO,
 			    "aborting scan on ndo_stop\n");
-		cfg80211_scan_done(priv->scan_request, 1);
+		cfg80211_scan_done(priv->scan_request, &info);
 		priv->scan_request = NULL;
 		priv->scan_aborting = true;
 	}

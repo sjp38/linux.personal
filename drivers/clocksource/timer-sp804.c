@@ -319,7 +319,6 @@ static int __init integrator_cp_of_init(struct device_node *np)
 		ret = __sp804_clocksource_and_sched_clock_init(base, name, clk, 0);
 		if (ret)
 			goto err;
-			
 	} else {
 		irq = irq_of_parse_and_map(np, 0);
 		if (irq <= 0)

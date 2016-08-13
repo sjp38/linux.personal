@@ -1430,7 +1430,7 @@ int dso__load(struct dso *dso, struct map *map, symbol_filter_t filter)
 	 * Read the build id if possible. This is required for
 	 * DSO_BINARY_TYPE__BUILDID_DEBUGINFO to work
 	 */
-	if (is_regular_file(name) &&
+	if (is_regular_file(dso->long_name) &&
 	    filename__read_build_id(dso->long_name, build_id, BUILD_ID_SIZE) > 0)
 		dso__set_build_id(dso, build_id);
 
@@ -1626,7 +1626,7 @@ static int find_matching_kcore(struct map *map, char *dir, size_t dir_sz)
 	if (!dirs)
 		return -1;
 
-	strlist__for_each(nd, dirs) {
+	strlist__for_each_entry(nd, dirs) {
 		scnprintf(kallsyms_filename, sizeof(kallsyms_filename),
 			  "%s/%s/kallsyms", dir, nd->s);
 		if (!validate_kcore_addresses(kallsyms_filename, map)) {

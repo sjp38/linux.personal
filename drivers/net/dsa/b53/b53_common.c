@@ -679,7 +679,7 @@ static void b53_get_ethtool_stats(struct dsa_switch *ds, int port,
 	for (i = 0; i < mib_size; i++) {
 		s = &mibs[i];
 
-		if (mibs->size == 8) {
+		if (s->size == 8) {
 			b53_read64(dev, B53_MIB_PAGE(port), s->offset, &val);
 		} else {
 			u32 val32;
@@ -1576,6 +1576,18 @@ static const struct b53_chip_data b53_switch_chips[] = {
 		.enabled_ports = 0x1f,
 		.arl_entries = 4,
 		.cpu_port = B53_CPU_PORT_25, /* TODO: auto detect */
+		.vta_regs = B53_VTA_REGS,
+		.duplex_reg = B53_DUPLEX_STAT_GE,
+		.jumbo_pm_reg = B53_JUMBO_PORT_MASK,
+		.jumbo_size_reg = B53_JUMBO_MAX_SIZE,
+	},
+	{
+		.chip_id = BCM58XX_DEVICE_ID,
+		.dev_name = "BCM585xx/586xx/88312",
+		.vlans	= 4096,
+		.enabled_ports = 0x1ff,
+		.arl_entries = 4,
+		.cpu_port = B53_CPU_PORT_25,
 		.vta_regs = B53_VTA_REGS,
 		.duplex_reg = B53_DUPLEX_STAT_GE,
 		.jumbo_pm_reg = B53_JUMBO_PORT_MASK,

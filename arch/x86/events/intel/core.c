@@ -3109,7 +3109,7 @@ static int intel_pmu_cpu_prepare(int cpu)
 		cpuc->excl_thread_id = 0;
 	}
 
-	return NOTIFY_OK;
+	return 0;
 
 err_constraint_list:
 	kfree(cpuc->constraint_list);
@@ -3120,7 +3120,7 @@ err_shared_regs:
 	cpuc->shared_regs = NULL;
 
 err:
-	return NOTIFY_BAD;
+	return -ENOMEM;
 }
 
 static void intel_pmu_cpu_starting(int cpu)
@@ -3390,6 +3390,13 @@ static void intel_snb_check_microcode(void)
 	}
 }
 
+static bool is_lbr_from(unsigned long msr)
+{
+	unsigned long lbr_from_nr = x86_pmu.lbr_from + x86_pmu.lbr_nr;
+
+	return x86_pmu.lbr_from <= msr && msr < lbr_from_nr;
+}
+
 /*
  * Under certain circumstances, access certain MSR may cause #GP.
  * The function tests if the input MSR can be safely accessed.
@@ -3410,12 +3417,23 @@ static bool check_msr(unsigned long msr, u64 mask)
 	 * Only change the bits which can be updated by wrmsrl.
 	 */
 	val_tmp = val_old ^ mask;
+
+	if (is_lbr_from(msr))
+		val_tmp = lbr_from_signext_quirk_wr(val_tmp);
+
 	if (wrmsrl_safe(msr, val_tmp) ||
 	    rdmsrl_safe(msr, &val_new))
 		return false;
 
+	/*
+	 * Quirk only affects validation in wrmsr(), so wrmsrl()'s value
+	 * should equal rdmsrl()'s even with the quirk.
+	 */
 	if (val_new != val_tmp)
 		return false;
+
+	if (is_lbr_from(msr))
+		val_old = lbr_from_signext_quirk_wr(val_old);
 
 	/* Here it's sure that the MSR can be safely accessed.
 	 * Restore the old value and return.
@@ -3987,6 +4005,8 @@ __init int intel_pmu_init(void)
 			x86_pmu.lbr_nr = 0;
 	}
 
+	if (x86_pmu.lbr_nr)
+		pr_cont("%d-deep LBR, ", x86_pmu.lbr_nr);
 	/*
 	 * Access extra MSR may cause #GP under certain circumstances.
 	 * E.g. KVM doesn't support offcore event

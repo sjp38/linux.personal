@@ -372,7 +372,9 @@ void f2fs_balance_fs_bg(struct f2fs_sb_info *sbi)
 		try_to_free_nats(sbi, NAT_ENTRY_PER_BLOCK);
 
 	if (!available_free_memory(sbi, FREE_NIDS))
-		try_to_free_nids(sbi, NAT_ENTRY_PER_BLOCK * FREE_NID_PAGES);
+		try_to_free_nids(sbi, MAX_FREE_NIDS);
+	else
+		build_free_nids(sbi);
 
 	/* checkpoint is the only way to shrink partial cached entries */
 	if (!available_free_memory(sbi, NAT_ENTRIES) ||
@@ -380,8 +382,13 @@ void f2fs_balance_fs_bg(struct f2fs_sb_info *sbi)
 			excess_prefree_segs(sbi) ||
 			excess_dirty_nats(sbi) ||
 			(is_idle(sbi) && f2fs_time_over(sbi, CP_TIME))) {
-		if (test_opt(sbi, DATA_FLUSH))
+		if (test_opt(sbi, DATA_FLUSH)) {
+			struct blk_plug plug;
+
+			blk_start_plug(&plug);
 			sync_dirty_inodes(sbi, FILE_INODE);
+			blk_finish_plug(&plug);
+		}
 		f2fs_sync_fs(sbi->sb, true);
 		stat_inc_bg_cp_count(sbi->stat_info);
 	}
@@ -673,6 +680,10 @@ static void add_discard_addrs(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 			break;
 
 		end = __find_rev_next_zero_bit(dmap, max_blocks, start + 1);
+		if (force && start && end != max_blocks
+					&& (end - start) < cpc->trim_minlen)
+			continue;
+
 		__add_discard_entry(sbi, cpc, se, start, end);
 	}
 }
@@ -711,6 +722,7 @@ void clear_prefree_segments(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 	unsigned long *prefree_map = dirty_i->dirty_segmap[PRE];
 	unsigned int start = 0, end = -1;
 	unsigned int secno, start_segno;
+	bool force = (cpc->reason == CP_DISCARD);
 
 	mutex_lock(&dirty_i->seglist_lock);
 
@@ -727,7 +739,7 @@ void clear_prefree_segments(struct f2fs_sb_info *sbi, struct cp_control *cpc)
 
 		dirty_i->nr_dirty[PRE] -= end - start;
 
-		if (!test_opt(sbi, DISCARD))
+		if (force || !test_opt(sbi, DISCARD))
 			continue;
 
 		if (!test_opt(sbi, LFS) || sbi->segs_per_sec == 1) {
@@ -751,7 +763,7 @@ next:
 
 	/* send small discards */
 	list_for_each_entry_safe(entry, this, head, list) {
-		if (cpc->reason == CP_DISCARD && entry->len < cpc->trim_minlen)
+		if (force && entry->len < cpc->trim_minlen)
 			goto skip;
 		f2fs_issue_discard(sbi, entry->blkaddr, entry->len);
 		cpc->trimmed += entry->len;
@@ -2406,6 +2418,9 @@ int build_segment_manager(struct f2fs_sb_info *sbi)
 	sm_info->ssa_blkaddr = le32_to_cpu(raw_super->ssa_blkaddr);
 	sm_info->rec_prefree_segments = sm_info->main_segments *
 					DEF_RECLAIM_PREFREE_SEGMENTS / 100;
+	if (sm_info->rec_prefree_segments > DEF_MAX_RECLAIM_PREFREE_SEGMENTS)
+		sm_info->rec_prefree_segments = DEF_MAX_RECLAIM_PREFREE_SEGMENTS;
+
 	if (!test_opt(sbi, LFS))
 		sm_info->ipu_policy = 1 << F2FS_IPU_FSYNC;
 	sm_info->min_ipu_util = DEF_MIN_IPU_UTIL;

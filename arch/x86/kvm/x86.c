@@ -36,7 +36,8 @@
 #include <linux/kvm.h>
 #include <linux/fs.h>
 #include <linux/vmalloc.h>
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/moduleparam.h>
 #include <linux/mman.h>
 #include <linux/highmem.h>
 #include <linux/iommu.h>
@@ -70,7 +71,8 @@
 
 #define MAX_IO_MSRS 256
 #define KVM_MAX_MCE_BANKS 32
-#define KVM_MCE_CAP_SUPPORTED (MCG_CTL_P | MCG_SER_P)
+u64 __read_mostly kvm_mce_cap_supported = MCG_CTL_P | MCG_SER_P;
+EXPORT_SYMBOL_GPL(kvm_mce_cap_supported);
 
 #define emul_to_vcpu(ctxt) \
 	container_of(ctxt, struct kvm_vcpu, arch.emulate_ctxt)
@@ -88,6 +90,9 @@ static u64 __read_mostly efer_reserved_bits = ~((u64)EFER_SCE);
 
 #define VM_STAT(x) offsetof(struct kvm, stat.x), KVM_STAT_VM
 #define VCPU_STAT(x) offsetof(struct kvm_vcpu, stat.x), KVM_STAT_VCPU
+
+#define KVM_X2APIC_API_VALID_FLAGS (KVM_X2APIC_API_USE_32BIT_IDS | \
+                                    KVM_X2APIC_API_DISABLE_BROADCAST_QUIRK)
 
 static void update_cr8_intercept(struct kvm_vcpu *vcpu);
 static void process_nmi(struct kvm_vcpu *vcpu);
@@ -539,7 +544,7 @@ int load_pdptrs(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu, unsigned long cr3)
 		goto out;
 	}
 	for (i = 0; i < ARRAY_SIZE(pdpte); ++i) {
-		if (is_present_gpte(pdpte[i]) &&
+		if ((pdpte[i] & PT_PRESENT_MASK) &&
 		    (pdpte[i] &
 		     vcpu->arch.mmu.guest_rsvd_check.rsvd_bits_mask[0][2])) {
 			ret = 0;
@@ -984,6 +989,7 @@ static u32 emulated_msrs[] = {
 	MSR_IA32_MISC_ENABLE,
 	MSR_IA32_MCG_STATUS,
 	MSR_IA32_MCG_CTL,
+	MSR_IA32_MCG_EXT_CTL,
 	MSR_IA32_SMBASE,
 };
 
@@ -1163,7 +1169,7 @@ static void kvm_write_wall_clock(struct kvm *kvm, gpa_t wall_clock)
 	int version;
 	int r;
 	struct pvclock_wall_clock wc;
-	struct timespec boot;
+	struct timespec64 boot;
 
 	if (!wall_clock)
 		return;
@@ -1186,13 +1192,13 @@ static void kvm_write_wall_clock(struct kvm *kvm, gpa_t wall_clock)
 	 * wall clock specified here.  guest system time equals host
 	 * system time for us, thus we must fill in host boot time here.
 	 */
-	getboottime(&boot);
+	getboottime64(&boot);
 
 	if (kvm->arch.kvmclock_offset) {
-		struct timespec ts = ns_to_timespec(kvm->arch.kvmclock_offset);
-		boot = timespec_sub(boot, ts);
+		struct timespec64 ts = ns_to_timespec64(kvm->arch.kvmclock_offset);
+		boot = timespec64_sub(boot, ts);
 	}
-	wc.sec = boot.tv_sec;
+	wc.sec = (u32)boot.tv_sec; /* overflow in 2106 guest time */
 	wc.nsec = boot.tv_nsec;
 	wc.version = version;
 
@@ -2617,6 +2623,9 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_TSC_CONTROL:
 		r = kvm_has_tsc_control;
 		break;
+	case KVM_CAP_X2APIC_API:
+		r = KVM_X2APIC_API_VALID_FLAGS;
+		break;
 	default:
 		r = 0;
 		break;
@@ -2679,11 +2688,9 @@ long kvm_arch_dev_ioctl(struct file *filp,
 		break;
 	}
 	case KVM_X86_GET_MCE_CAP_SUPPORTED: {
-		u64 mce_cap;
-
-		mce_cap = KVM_MCE_CAP_SUPPORTED;
 		r = -EFAULT;
-		if (copy_to_user(argp, &mce_cap, sizeof mce_cap))
+		if (copy_to_user(argp, &kvm_mce_cap_supported,
+				 sizeof(kvm_mce_cap_supported)))
 			goto out;
 		r = 0;
 		break;
@@ -2773,15 +2780,17 @@ static int kvm_vcpu_ioctl_get_lapic(struct kvm_vcpu *vcpu,
 	if (vcpu->arch.apicv_active)
 		kvm_x86_ops->sync_pir_to_irr(vcpu);
 
-	memcpy(s->regs, vcpu->arch.apic->regs, sizeof *s);
-
-	return 0;
+	return kvm_apic_get_state(vcpu, s);
 }
 
 static int kvm_vcpu_ioctl_set_lapic(struct kvm_vcpu *vcpu,
 				    struct kvm_lapic_state *s)
 {
-	kvm_apic_post_state_restore(vcpu, s);
+	int r;
+
+	r = kvm_apic_set_state(vcpu, s);
+	if (r)
+		return r;
 	update_cr8_intercept(vcpu);
 
 	return 0;
@@ -2866,7 +2875,7 @@ static int kvm_vcpu_ioctl_x86_setup_mce(struct kvm_vcpu *vcpu,
 	r = -EINVAL;
 	if (!bank_num || bank_num >= KVM_MAX_MCE_BANKS)
 		goto out;
-	if (mcg_cap & ~(KVM_MCE_CAP_SUPPORTED | 0xff | 0xff0000))
+	if (mcg_cap & ~(kvm_mce_cap_supported | 0xff | 0xff0000))
 		goto out;
 	r = 0;
 	vcpu->arch.mcg_cap = mcg_cap;
@@ -2876,6 +2885,9 @@ static int kvm_vcpu_ioctl_x86_setup_mce(struct kvm_vcpu *vcpu,
 	/* Init IA32_MCi_CTL to all 1s */
 	for (bank = 0; bank < bank_num; bank++)
 		vcpu->arch.mce_banks[bank*4] = ~(u64)0;
+
+	if (kvm_x86_ops->setup_mce)
+		kvm_x86_ops->setup_mce(vcpu);
 out:
 	return r;
 }
@@ -3788,6 +3800,18 @@ split_irqchip_unlock:
 		mutex_unlock(&kvm->lock);
 		break;
 	}
+	case KVM_CAP_X2APIC_API:
+		r = -EINVAL;
+		if (cap->args[0] & ~KVM_X2APIC_API_VALID_FLAGS)
+			break;
+
+		if (cap->args[0] & KVM_X2APIC_API_USE_32BIT_IDS)
+			kvm->arch.x2apic_format = true;
+		if (cap->args[0] & KVM_X2APIC_API_DISABLE_BROADCAST_QUIRK)
+			kvm->arch.x2apic_broadcast_quirk_disabled = true;
+
+		r = 0;
+		break;
 	default:
 		r = -EINVAL;
 		break;
@@ -5554,9 +5578,10 @@ int kvm_fast_pio_out(struct kvm_vcpu *vcpu, int size, unsigned short port)
 }
 EXPORT_SYMBOL_GPL(kvm_fast_pio_out);
 
-static void tsc_bad(void *info)
+static int kvmclock_cpu_down_prep(unsigned int cpu)
 {
 	__this_cpu_write(cpu_tsc_khz, 0);
+	return 0;
 }
 
 static void tsc_khz_changed(void *data)
@@ -5661,27 +5686,11 @@ static struct notifier_block kvmclock_cpufreq_notifier_block = {
 	.notifier_call  = kvmclock_cpufreq_notifier
 };
 
-static int kvmclock_cpu_notifier(struct notifier_block *nfb,
-					unsigned long action, void *hcpu)
+static int kvmclock_cpu_online(unsigned int cpu)
 {
-	unsigned int cpu = (unsigned long)hcpu;
-
-	switch (action) {
-		case CPU_ONLINE:
-		case CPU_DOWN_FAILED:
-			smp_call_function_single(cpu, tsc_khz_changed, NULL, 1);
-			break;
-		case CPU_DOWN_PREPARE:
-			smp_call_function_single(cpu, tsc_bad, NULL, 1);
-			break;
-	}
-	return NOTIFY_OK;
+	tsc_khz_changed(NULL);
+	return 0;
 }
-
-static struct notifier_block kvmclock_cpu_notifier_block = {
-	.notifier_call  = kvmclock_cpu_notifier,
-	.priority = -INT_MAX
-};
 
 static void kvm_timer_init(void)
 {
@@ -5689,7 +5698,6 @@ static void kvm_timer_init(void)
 
 	max_tsc_khz = tsc_khz;
 
-	cpu_notifier_register_begin();
 	if (!boot_cpu_has(X86_FEATURE_CONSTANT_TSC)) {
 #ifdef CONFIG_CPU_FREQ
 		struct cpufreq_policy policy;
@@ -5704,12 +5712,9 @@ static void kvm_timer_init(void)
 					  CPUFREQ_TRANSITION_NOTIFIER);
 	}
 	pr_debug("kvm: max_tsc_khz = %ld\n", max_tsc_khz);
-	for_each_online_cpu(cpu)
-		smp_call_function_single(cpu, tsc_khz_changed, NULL, 1);
 
-	__register_hotcpu_notifier(&kvmclock_cpu_notifier_block);
-	cpu_notifier_register_done();
-
+	cpuhp_setup_state(CPUHP_AP_X86_KVM_CLK_ONLINE, "AP_X86_KVM_CLK_ONLINE",
+			  kvmclock_cpu_online, kvmclock_cpu_down_prep);
 }
 
 static DEFINE_PER_CPU(struct kvm_vcpu *, current_vcpu);
@@ -5869,8 +5874,8 @@ int kvm_arch_init(void *opaque)
 	kvm_x86_ops = ops;
 
 	kvm_mmu_set_mask_ptes(PT_USER_MASK, PT_ACCESSED_MASK,
-			PT_DIRTY_MASK, PT64_NX_MASK, 0);
-
+			PT_DIRTY_MASK, PT64_NX_MASK, 0,
+			PT_PRESENT_MASK);
 	kvm_timer_init();
 
 	perf_register_guest_info_callbacks(&kvm_guest_cbs);
@@ -5898,7 +5903,7 @@ void kvm_arch_exit(void)
 	if (!boot_cpu_has(X86_FEATURE_CONSTANT_TSC))
 		cpufreq_unregister_notifier(&kvmclock_cpufreq_notifier_block,
 					    CPUFREQ_TRANSITION_NOTIFIER);
-	unregister_hotcpu_notifier(&kvmclock_cpu_notifier_block);
+	cpuhp_remove_state_nocalls(CPUHP_AP_X86_KVM_CLK_ONLINE);
 #ifdef CONFIG_X86_64
 	pvclock_gtod_unregister_notifier(&pvclock_gtod_notifier);
 #endif
@@ -6649,7 +6654,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	trace_kvm_entry(vcpu->vcpu_id);
 	wait_lapic_expire(vcpu);
-	__kvm_guest_enter();
+	guest_enter_irqoff();
 
 	if (unlikely(vcpu->arch.switch_db_regs)) {
 		set_debugreg(0, 7);
@@ -6700,16 +6705,9 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	++vcpu->stat.exits;
 
-	/*
-	 * We must have an instruction between local_irq_enable() and
-	 * kvm_guest_exit(), so the timer interrupt isn't delayed by
-	 * the interrupt shadow.  The stat.exits increment will do nicely.
-	 * But we need to prevent reordering, hence this barrier():
-	 */
-	barrier();
+	guest_exit_irqoff();
 
-	kvm_guest_exit();
-
+	local_irq_enable();
 	preempt_enable();
 
 	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
@@ -7905,7 +7903,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 	kfree(kvm->arch.vpic);
 	kfree(kvm->arch.vioapic);
 	kvm_free_vcpus(kvm);
-	kfree(rcu_dereference_check(kvm->arch.apic_map, 1));
+	kvfree(rcu_dereference_check(kvm->arch.apic_map, 1));
 	kvm_mmu_uninit_vm(kvm);
 }
 

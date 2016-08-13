@@ -59,7 +59,8 @@ void read_inline_data(struct page *page, struct page *ipage)
 	memcpy(dst_addr, src_addr, MAX_INLINE_DATA);
 	flush_dcache_page(page);
 	kunmap_atomic(dst_addr);
-	SetPageUptodate(page);
+	if (!PageUptodate(page))
+		SetPageUptodate(page);
 }
 
 bool truncate_inline_inode(struct page *ipage, u64 from)
@@ -97,7 +98,8 @@ int f2fs_read_inline_data(struct inode *inode, struct page *page)
 	else
 		read_inline_data(page, ipage);
 
-	SetPageUptodate(page);
+	if (!PageUptodate(page))
+		SetPageUptodate(page);
 	f2fs_put_page(ipage, 1);
 	unlock_page(page);
 	return 0;
@@ -371,7 +373,8 @@ static int f2fs_move_inline_dirents(struct inode *dir, struct page *ipage,
 					NR_INLINE_DENTRY * F2FS_SLOT_LEN);
 
 	kunmap_atomic(dentry_blk);
-	SetPageUptodate(page);
+	if (!PageUptodate(page))
+		SetPageUptodate(page);
 	set_page_dirty(page);
 
 	/* clear inline dir and flag after data writeback */
@@ -567,7 +570,7 @@ void f2fs_delete_inline_entry(struct f2fs_dir_entry *dentry, struct page *page,
 	f2fs_put_page(page, 1);
 
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
-	mark_inode_dirty_sync(dir);
+	f2fs_mark_inode_dirty_sync(dir);
 
 	if (inode)
 		f2fs_drop_nlink(dir, inode);

@@ -186,7 +186,7 @@ void blk_queue_split(struct request_queue *q, struct bio **bio,
 
 	if (split) {
 		/* there isn't chance to merge the splitted bio */
-		split->bi_rw |= REQ_NOMERGE;
+		split->bi_opf |= REQ_NOMERGE;
 
 		bio_chain(split, *bio);
 		trace_block_split(q, split, (*bio)->bi_iter.bi_sector);
@@ -500,7 +500,7 @@ int ll_back_merge_fn(struct request_queue *q, struct request *req,
 	    integrity_req_gap_back_merge(req, bio))
 		return 0;
 	if (blk_rq_sectors(req) + bio_sectors(bio) >
-	    blk_rq_get_max_sectors(req)) {
+	    blk_rq_get_max_sectors(req, blk_rq_pos(req))) {
 		req->cmd_flags |= REQ_NOMERGE;
 		if (req == q->last_merge)
 			q->last_merge = NULL;
@@ -524,7 +524,7 @@ int ll_front_merge_fn(struct request_queue *q, struct request *req,
 	    integrity_req_gap_front_merge(req, bio))
 		return 0;
 	if (blk_rq_sectors(req) + bio_sectors(bio) >
-	    blk_rq_get_max_sectors(req)) {
+	    blk_rq_get_max_sectors(req, bio->bi_iter.bi_sector)) {
 		req->cmd_flags |= REQ_NOMERGE;
 		if (req == q->last_merge)
 			q->last_merge = NULL;
@@ -570,7 +570,7 @@ static int ll_merge_requests_fn(struct request_queue *q, struct request *req,
 	 * Will it become too large?
 	 */
 	if ((blk_rq_sectors(req) + blk_rq_sectors(next)) >
-	    blk_rq_get_max_sectors(req))
+	    blk_rq_get_max_sectors(req, blk_rq_pos(req)))
 		return 0;
 
 	total_phys_segments = req->nr_phys_segments + next->nr_phys_segments;
@@ -616,9 +616,9 @@ void blk_rq_set_mixed_merge(struct request *rq)
 	 * Distributes the attributs to each bio.
 	 */
 	for (bio = rq->bio; bio; bio = bio->bi_next) {
-		WARN_ON_ONCE((bio->bi_rw & REQ_FAILFAST_MASK) &&
-			     (bio->bi_rw & REQ_FAILFAST_MASK) != ff);
-		bio->bi_rw |= ff;
+		WARN_ON_ONCE((bio->bi_opf & REQ_FAILFAST_MASK) &&
+			     (bio->bi_opf & REQ_FAILFAST_MASK) != ff);
+		bio->bi_opf |= ff;
 	}
 	rq->cmd_flags |= REQ_MIXED_MERGE;
 }
@@ -743,6 +743,12 @@ int attempt_front_merge(struct request_queue *q, struct request *rq)
 int blk_attempt_req_merge(struct request_queue *q, struct request *rq,
 			  struct request *next)
 {
+	struct elevator_queue *e = q->elevator;
+
+	if (e->type->ops.elevator_allow_rq_merge_fn)
+		if (!e->type->ops.elevator_allow_rq_merge_fn(q, rq, next))
+			return 0;
+
 	return attempt_merge(q, rq, next);
 }
 

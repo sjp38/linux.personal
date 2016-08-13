@@ -162,9 +162,9 @@ int diag14(unsigned long rx, unsigned long ry1, unsigned long subcode)
 }
 EXPORT_SYMBOL(diag14);
 
-static inline int __diag204(unsigned long subcode, unsigned long size, void *addr)
+static inline int __diag204(unsigned long *subcode, unsigned long size, void *addr)
 {
-	register unsigned long _subcode asm("0") = subcode;
+	register unsigned long _subcode asm("0") = *subcode;
 	register unsigned long _size asm("1") = size;
 
 	asm volatile(
@@ -172,15 +172,17 @@ static inline int __diag204(unsigned long subcode, unsigned long size, void *add
 		"0:	nopr	%%r7\n"
 		EX_TABLE(0b,0b)
 		: "+d" (_subcode), "+d" (_size) : "d" (addr) : "memory");
-	if (_subcode)
-		return -1;
+	*subcode = _subcode;
 	return _size;
 }
 
 int diag204(unsigned long subcode, unsigned long size, void *addr)
 {
 	diag_stat_inc(DIAG_STAT_X204);
-	return __diag204(subcode, size, addr);
+	size = __diag204(&subcode, size, addr);
+	if (subcode)
+		return -1;
+	return size;
 }
 EXPORT_SYMBOL(diag204);
 

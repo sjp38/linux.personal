@@ -905,7 +905,7 @@ static void raise_barrier(struct r10conf *conf, int force)
 
 	/* Now wait for all pending IO to complete */
 	wait_event_lock_irq(conf->wait_barrier,
-			    !conf->nr_pending && conf->barrier < RESYNC_DEPTH,
+			    !atomic_read(&conf->nr_pending) && conf->barrier < RESYNC_DEPTH,
 			    conf->resync_lock);
 
 	spin_unlock_irq(&conf->resync_lock);
@@ -936,23 +936,23 @@ static void wait_barrier(struct r10conf *conf)
 		 */
 		wait_event_lock_irq(conf->wait_barrier,
 				    !conf->barrier ||
-				    (conf->nr_pending &&
+				    (atomic_read(&conf->nr_pending) &&
 				     current->bio_list &&
 				     !bio_list_empty(current->bio_list)),
 				    conf->resync_lock);
 		conf->nr_waiting--;
+		if (!conf->nr_waiting)
+			wake_up(&conf->wait_barrier);
 	}
-	conf->nr_pending++;
+	atomic_inc(&conf->nr_pending);
 	spin_unlock_irq(&conf->resync_lock);
 }
 
 static void allow_barrier(struct r10conf *conf)
 {
-	unsigned long flags;
-	spin_lock_irqsave(&conf->resync_lock, flags);
-	conf->nr_pending--;
-	spin_unlock_irqrestore(&conf->resync_lock, flags);
-	wake_up(&conf->wait_barrier);
+	if ((atomic_dec_and_test(&conf->nr_pending)) ||
+			(conf->array_freeze_pending))
+		wake_up(&conf->wait_barrier);
 }
 
 static void freeze_array(struct r10conf *conf, int extra)
@@ -970,13 +970,15 @@ static void freeze_array(struct r10conf *conf, int extra)
 	 * we continue.
 	 */
 	spin_lock_irq(&conf->resync_lock);
+	conf->array_freeze_pending++;
 	conf->barrier++;
 	conf->nr_waiting++;
 	wait_event_lock_irq_cmd(conf->wait_barrier,
-				conf->nr_pending == conf->nr_queued+extra,
+				atomic_read(&conf->nr_pending) == conf->nr_queued+extra,
 				conf->resync_lock,
 				flush_pending_writes(conf));
 
+	conf->array_freeze_pending--;
 	spin_unlock_irq(&conf->resync_lock);
 }
 
@@ -1052,8 +1054,8 @@ static void __make_request(struct mddev *mddev, struct bio *bio)
 	int i;
 	const int op = bio_op(bio);
 	const int rw = bio_data_dir(bio);
-	const unsigned long do_sync = (bio->bi_rw & REQ_SYNC);
-	const unsigned long do_fua = (bio->bi_rw & REQ_FUA);
+	const unsigned long do_sync = (bio->bi_opf & REQ_SYNC);
+	const unsigned long do_fua = (bio->bi_opf & REQ_FUA);
 	unsigned long flags;
 	struct md_rdev *blocked_rdev;
 	struct blk_plug_cb *cb;
@@ -1438,7 +1440,7 @@ static void raid10_make_request(struct mddev *mddev, struct bio *bio)
 
 	struct bio *split;
 
-	if (unlikely(bio->bi_rw & REQ_PREFLUSH)) {
+	if (unlikely(bio->bi_opf & REQ_PREFLUSH)) {
 		md_flush_request(mddev, bio);
 		return;
 	}
@@ -2170,21 +2172,20 @@ static void recovery_request_write(struct mddev *mddev, struct r10bio *r10_bio)
  */
 static void check_decay_read_errors(struct mddev *mddev, struct md_rdev *rdev)
 {
-	struct timespec cur_time_mon;
+	long cur_time_mon;
 	unsigned long hours_since_last;
 	unsigned int read_errors = atomic_read(&rdev->read_errors);
 
-	ktime_get_ts(&cur_time_mon);
+	cur_time_mon = ktime_get_seconds();
 
-	if (rdev->last_read_error.tv_sec == 0 &&
-	    rdev->last_read_error.tv_nsec == 0) {
+	if (rdev->last_read_error == 0) {
 		/* first time we've seen a read error */
 		rdev->last_read_error = cur_time_mon;
 		return;
 	}
 
-	hours_since_last = (cur_time_mon.tv_sec -
-			    rdev->last_read_error.tv_sec) / 3600;
+	hours_since_last = (long)(cur_time_mon -
+			    rdev->last_read_error) / 3600;
 
 	rdev->last_read_error = cur_time_mon;
 
@@ -2532,7 +2533,7 @@ read_more:
 		return;
 	}
 
-	do_sync = (r10_bio->master_bio->bi_rw & REQ_SYNC);
+	do_sync = (r10_bio->master_bio->bi_opf & REQ_SYNC);
 	slot = r10_bio->read_slot;
 	printk_ratelimited(
 		KERN_ERR
@@ -3542,6 +3543,7 @@ static struct r10conf *setup_conf(struct mddev *mddev)
 
 	spin_lock_init(&conf->resync_lock);
 	init_waitqueue_head(&conf->wait_barrier);
+	atomic_set(&conf->nr_pending, 0);
 
 	conf->thread = md_register_thread(raid10d, mddev, "raid10");
 	if (!conf->thread)

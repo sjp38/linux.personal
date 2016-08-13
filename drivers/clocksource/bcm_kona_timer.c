@@ -167,11 +167,6 @@ static int __init kona_timer_init(struct device_node *node)
 	u32 freq;
 	struct clk *external_clk;
 
-	if (!of_device_is_available(node)) {
-		pr_info("Kona Timer v1 marked as disabled in device tree\n");
-		return 0;
-	}
-
 	external_clk = of_clk_get_by_name(node, NULL);
 
 	if (!IS_ERR(external_clk)) {

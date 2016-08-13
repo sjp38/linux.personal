@@ -76,6 +76,7 @@ enum {
 	Opt_disable_roll_forward,
 	Opt_norecovery,
 	Opt_discard,
+	Opt_nodiscard,
 	Opt_noheap,
 	Opt_user_xattr,
 	Opt_nouser_xattr,
@@ -106,6 +107,7 @@ static match_table_t f2fs_tokens = {
 	{Opt_disable_roll_forward, "disable_roll_forward"},
 	{Opt_norecovery, "norecovery"},
 	{Opt_discard, "discard"},
+	{Opt_nodiscard, "nodiscard"},
 	{Opt_noheap, "no_heap"},
 	{Opt_user_xattr, "user_xattr"},
 	{Opt_nouser_xattr, "nouser_xattr"},
@@ -426,6 +428,8 @@ static int parse_options(struct super_block *sb, char *options)
 					"the device does not support discard");
 			}
 			break;
+		case Opt_nodiscard:
+			clear_opt(sbi, DISCARD);
 		case Opt_noheap:
 			set_opt(sbi, NOHEAP);
 			break;
@@ -575,6 +579,8 @@ static struct inode *f2fs_alloc_inode(struct super_block *sb)
 	INIT_LIST_HEAD(&fi->gdirty_list);
 	INIT_LIST_HEAD(&fi->inmem_pages);
 	mutex_init(&fi->inmem_lock);
+	init_rwsem(&fi->dio_rwsem[READ]);
+	init_rwsem(&fi->dio_rwsem[WRITE]);
 
 	/* Will be used by directory only */
 	fi->i_dir_level = F2FS_SB(sb)->dir_level;
@@ -621,6 +627,43 @@ static int f2fs_drop_inode(struct inode *inode)
 	return generic_drop_inode(inode);
 }
 
+int f2fs_inode_dirtied(struct inode *inode)
+{
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+
+	spin_lock(&sbi->inode_lock[DIRTY_META]);
+	if (is_inode_flag_set(inode, FI_DIRTY_INODE)) {
+		spin_unlock(&sbi->inode_lock[DIRTY_META]);
+		return 1;
+	}
+
+	set_inode_flag(inode, FI_DIRTY_INODE);
+	list_add_tail(&F2FS_I(inode)->gdirty_list,
+				&sbi->inode_list[DIRTY_META]);
+	inc_page_count(sbi, F2FS_DIRTY_IMETA);
+	stat_inc_dirty_inode(sbi, DIRTY_META);
+	spin_unlock(&sbi->inode_lock[DIRTY_META]);
+
+	return 0;
+}
+
+void f2fs_inode_synced(struct inode *inode)
+{
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+
+	spin_lock(&sbi->inode_lock[DIRTY_META]);
+	if (!is_inode_flag_set(inode, FI_DIRTY_INODE)) {
+		spin_unlock(&sbi->inode_lock[DIRTY_META]);
+		return;
+	}
+	list_del_init(&F2FS_I(inode)->gdirty_list);
+	clear_inode_flag(inode, FI_DIRTY_INODE);
+	clear_inode_flag(inode, FI_AUTO_RECOVER);
+	dec_page_count(sbi, F2FS_DIRTY_IMETA);
+	stat_dec_dirty_inode(F2FS_I_SB(inode), DIRTY_META);
+	spin_unlock(&sbi->inode_lock[DIRTY_META]);
+}
+
 /*
  * f2fs_dirty_inode() is called from __mark_inode_dirty()
  *
@@ -640,35 +683,7 @@ static void f2fs_dirty_inode(struct inode *inode, int flags)
 	if (is_inode_flag_set(inode, FI_AUTO_RECOVER))
 		clear_inode_flag(inode, FI_AUTO_RECOVER);
 
-	spin_lock(&sbi->inode_lock[DIRTY_META]);
-	if (is_inode_flag_set(inode, FI_DIRTY_INODE)) {
-		spin_unlock(&sbi->inode_lock[DIRTY_META]);
-		return;
-	}
-
-	set_inode_flag(inode, FI_DIRTY_INODE);
-	list_add_tail(&F2FS_I(inode)->gdirty_list,
-				&sbi->inode_list[DIRTY_META]);
-	inc_page_count(sbi, F2FS_DIRTY_IMETA);
-	stat_inc_dirty_inode(sbi, DIRTY_META);
-	spin_unlock(&sbi->inode_lock[DIRTY_META]);
-}
-
-void f2fs_inode_synced(struct inode *inode)
-{
-	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
-
-	spin_lock(&sbi->inode_lock[DIRTY_META]);
-	if (!is_inode_flag_set(inode, FI_DIRTY_INODE)) {
-		spin_unlock(&sbi->inode_lock[DIRTY_META]);
-		return;
-	}
-	list_del_init(&F2FS_I(inode)->gdirty_list);
-	clear_inode_flag(inode, FI_DIRTY_INODE);
-	clear_inode_flag(inode, FI_AUTO_RECOVER);
-	dec_page_count(sbi, F2FS_DIRTY_IMETA);
-	stat_dec_dirty_inode(F2FS_I_SB(inode), DIRTY_META);
-	spin_unlock(&sbi->inode_lock[DIRTY_META]);
+	f2fs_inode_dirtied(inode);
 }
 
 static void f2fs_i_callback(struct rcu_head *head)
@@ -691,6 +706,8 @@ static void destroy_percpu_info(struct f2fs_sb_info *sbi)
 		percpu_counter_destroy(&sbi->nr_pages[i]);
 	percpu_counter_destroy(&sbi->alloc_valid_block_count);
 	percpu_counter_destroy(&sbi->total_valid_inode_count);
+
+	percpu_free_rwsem(&sbi->cp_rwsem);
 }
 
 static void f2fs_put_super(struct super_block *sb)
@@ -810,7 +827,7 @@ static int f2fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_bsize = sbi->blocksize;
 
 	buf->f_blocks = total_count - start_count;
-	buf->f_bfree = buf->f_blocks - valid_user_blocks(sbi) - ovp_count;
+	buf->f_bfree = user_block_count - valid_user_blocks(sbi) + ovp_count;
 	buf->f_bavail = user_block_count - valid_user_blocks(sbi);
 
 	buf->f_files = sbi->total_node_count - F2FS_RESERVED_NODE_NUM;
@@ -944,7 +961,6 @@ static int _name##_open_fs(struct inode *inode, struct file *file)	\
 }									\
 									\
 static const struct file_operations f2fs_seq_##_name##_fops = {		\
-	.owner = THIS_MODULE,						\
 	.open = _name##_open_fs,					\
 	.read = seq_read,						\
 	.llseek = seq_lseek,						\
@@ -1467,6 +1483,9 @@ static int init_percpu_info(struct f2fs_sb_info *sbi)
 {
 	int i, err;
 
+	if (percpu_init_rwsem(&sbi->cp_rwsem))
+		return -ENOMEM;
+
 	for (i = 0; i < NR_COUNT_TYPE; i++) {
 		err = percpu_counter_init(&sbi->nr_pages[i], 0, GFP_KERNEL);
 		if (err)
@@ -1667,7 +1686,6 @@ try_onemore:
 		sbi->write_io[i].bio = NULL;
 	}
 
-	init_rwsem(&sbi->cp_rwsem);
 	init_waitqueue_head(&sbi->cp_wait);
 	init_sb_info(sbi);
 

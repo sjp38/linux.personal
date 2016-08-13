@@ -123,10 +123,6 @@ static int sun4i_drv_bind(struct device *dev)
 	if (!drm)
 		return -ENOMEM;
 
-	ret = drm_dev_set_unique(drm, dev_name(drm->dev));
-	if (ret)
-		goto free_drm;
-
 	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv) {
 		ret = -ENOMEM;
@@ -178,14 +174,8 @@ static int sun4i_drv_bind(struct device *dev)
 	if (ret)
 		goto free_drm;
 
-	ret = drm_connector_register_all(drm);
-	if (ret)
-		goto unregister_drm;
-
 	return 0;
 
-unregister_drm:
-	drm_dev_unregister(drm);
 free_drm:
 	drm_dev_unref(drm);
 	return ret;
@@ -195,7 +185,6 @@ static void sun4i_drv_unbind(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
 
-	drm_connector_unregister_all(drm);
 	drm_dev_unregister(drm);
 	drm_kms_helper_poll_fini(drm);
 	sun4i_framebuffer_free(drm);

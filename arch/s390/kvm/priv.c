@@ -719,6 +719,7 @@ static const intercept_handler_t b2_handlers[256] = {
 	[0x10] = handle_set_prefix,
 	[0x11] = handle_store_prefix,
 	[0x12] = handle_store_cpu_address,
+	[0x14] = kvm_s390_handle_vsie,
 	[0x21] = handle_ipte_interlock,
 	[0x29] = handle_iske,
 	[0x2a] = handle_rrbe,
@@ -1184,7 +1185,15 @@ static int handle_sckpf(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
+static int handle_ptff(struct kvm_vcpu *vcpu)
+{
+	/* we don't emulate any control instructions yet */
+	kvm_s390_set_psw_cc(vcpu, 3);
+	return 0;
+}
+
 static const intercept_handler_t x01_handlers[256] = {
+	[0x04] = handle_ptff,
 	[0x07] = handle_sckpf,
 };
 

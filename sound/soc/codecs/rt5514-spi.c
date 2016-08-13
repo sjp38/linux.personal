@@ -80,7 +80,7 @@ static void rt5514_spi_copy_work(struct work_struct *work)
 {
 	struct rt5514_dsp *rt5514_dsp =
 		container_of(work, struct rt5514_dsp, copy_work.work);
-	struct snd_pcm_runtime *runtime = rt5514_dsp->substream->runtime;
+	struct snd_pcm_runtime *runtime;
 	size_t period_bytes, truncated_bytes = 0;
 
 	mutex_lock(&rt5514_dsp->dma_lock);
@@ -89,6 +89,7 @@ static void rt5514_spi_copy_work(struct work_struct *work)
 		goto done;
 	}
 
+	runtime = rt5514_dsp->substream->runtime;
 	period_bytes = snd_pcm_lib_period_bytes(rt5514_dsp->substream);
 
 	if (rt5514_dsp->buf_size - rt5514_dsp->dsp_offset <  period_bytes)
@@ -409,31 +410,19 @@ static int rt5514_spi_probe(struct spi_device *spi)
 
 	rt5514_spi = spi;
 
-	ret = snd_soc_register_platform(&spi->dev, &rt5514_spi_platform);
+	ret = devm_snd_soc_register_platform(&spi->dev, &rt5514_spi_platform);
 	if (ret < 0) {
 		dev_err(&spi->dev, "Failed to register platform.\n");
-		goto err_plat;
+		return ret;
 	}
 
-	ret = snd_soc_register_component(&spi->dev, &rt5514_spi_dai_component,
-					 &rt5514_spi_dai, 1);
+	ret = devm_snd_soc_register_component(&spi->dev,
+					      &rt5514_spi_dai_component,
+					      &rt5514_spi_dai, 1);
 	if (ret < 0) {
 		dev_err(&spi->dev, "Failed to register component.\n");
-		goto err_comp;
+		return ret;
 	}
-
-	return 0;
-err_comp:
-	snd_soc_unregister_platform(&spi->dev);
-err_plat:
-
-	return 0;
-}
-
-static int rt5514_spi_remove(struct spi_device *spi)
-{
-	snd_soc_unregister_component(&spi->dev);
-	snd_soc_unregister_platform(&spi->dev);
 
 	return 0;
 }
@@ -450,7 +439,6 @@ static struct spi_driver rt5514_spi_driver = {
 		.of_match_table = of_match_ptr(rt5514_of_match),
 	},
 	.probe = rt5514_spi_probe,
-	.remove = rt5514_spi_remove,
 };
 module_spi_driver(rt5514_spi_driver);
 

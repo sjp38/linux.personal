@@ -668,6 +668,8 @@ static int skl_probe(struct pci_dev *pci,
 
 	skl->pci_id = pci->device;
 
+	device_disable_async_suspend(bus->dev);
+
 	skl->nhlt = skl_nhlt_init(bus->dev);
 
 	if (skl->nhlt == NULL)
@@ -726,7 +728,7 @@ static int skl_probe(struct pci_dev *pci,
 	list_for_each_entry(hlink, &ebus->hlink_list, list)
 		snd_hdac_ext_bus_link_put(ebus, hlink);
 
-	/*configure PM */
+	/* configure PM */
 	pm_runtime_put_noidle(bus->dev);
 	pm_runtime_allow(bus->dev);
 
@@ -779,8 +781,7 @@ static void skl_remove(struct pci_dev *pci)
 	struct hdac_ext_bus *ebus = pci_get_drvdata(pci);
 	struct skl *skl = ebus_to_skl(ebus);
 
-	if (skl->tplg)
-		release_firmware(skl->tplg);
+	release_firmware(skl->tplg);
 
 	if (pci_dev_run_wake(pci))
 		pm_runtime_get_noresume(&pci->dev);
@@ -799,9 +800,9 @@ static void skl_remove(struct pci_dev *pci)
 
 static struct sst_acpi_mach sst_skl_devdata[] = {
 	{ "INT343A", "skl_alc286s_i2s", "intel/dsp_fw_release.bin", NULL, NULL, NULL },
-	{ "INT343B", "skl_nau88l25_ssm4567_i2s", "intel/dsp_fw_release.bin",
+	{ "INT343B", "skl_n88l25_s4567", "intel/dsp_fw_release.bin",
 				NULL, NULL, &skl_dmic_data },
-	{ "MX98357A", "skl_nau88l25_max98357a_i2s", "intel/dsp_fw_release.bin",
+	{ "MX98357A", "skl_n88l25_m98357a", "intel/dsp_fw_release.bin",
 				NULL, NULL, &skl_dmic_data },
 	{}
 };
@@ -809,6 +810,13 @@ static struct sst_acpi_mach sst_skl_devdata[] = {
 static struct sst_acpi_mach sst_bxtp_devdata[] = {
 	{ "INT343A", "bxt_alc298s_i2s", "intel/dsp_fw_bxtn.bin", NULL, NULL, NULL },
 	{ "DLGS7219", "bxt_da7219_max98357a_i2s", "intel/dsp_fw_bxtn.bin", NULL, NULL, NULL },
+};
+
+static struct sst_acpi_mach sst_kbl_devdata[] = {
+	{ "INT343A", "kbl_alc286s_i2s", "intel/dsp_fw_kbl.bin", NULL, NULL, NULL },
+	{ "INT343B", "kbl_n88l25_s4567", "intel/dsp_fw_kbl.bin", NULL, NULL, &skl_dmic_data },
+	{ "MX98357A", "kbl_n88l25_m98357a", "intel/dsp_fw_kbl.bin", NULL, NULL, &skl_dmic_data },
+	{}
 };
 
 /* PCI IDs */
@@ -819,6 +827,9 @@ static const struct pci_device_id skl_ids[] = {
 	/* BXT-P */
 	{ PCI_DEVICE(0x8086, 0x5a98),
 		.driver_data = (unsigned long)&sst_bxtp_devdata},
+	/* KBL */
+	{ PCI_DEVICE(0x8086, 0x9D71),
+		.driver_data = (unsigned long)&sst_kbl_devdata},
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, skl_ids);

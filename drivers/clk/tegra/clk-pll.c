@@ -2618,9 +2618,9 @@ static int clk_pllu_tegra210_enable(struct clk_hw *hw)
 	value = readl_relaxed(pll->clk_base + UTMIP_PLL_CFG1);
 	value &= ~UTMIP_PLL_CFG1_FORCE_PLL_ENABLE_POWERDOWN;
 	value |= UTMIP_PLL_CFG1_FORCE_PLL_ENABLE_POWERUP;
-	writel_relaxed(value, pll->clk_base + UTMIP_PLL_CFG1);
+	writel(value, pll->clk_base + UTMIP_PLL_CFG1);
 
-	usleep_range(100, 200);
+	udelay(1);
 
 	/* Enable samplers for SNPS, XUSB_HOST, XUSB_DEV */
 	value = readl_relaxed(pll->clk_base + UTMIP_PLL_CFG2);

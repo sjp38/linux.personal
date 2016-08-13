@@ -21,6 +21,7 @@
 #include <linux/bitops.h>
 #include <linux/count_zeros.h>
 #include <linux/byteorder/generic.h>
+#include <linux/scatterlist.h>
 #include <linux/string.h>
 #include "mpi-internal.h"
 
@@ -237,16 +238,13 @@ EXPORT_SYMBOL_GPL(mpi_get_buffer);
  * @a:		a multi precision integer
  * @sgl:	scatterlist to write to. Needs to be at least
  *		mpi_get_size(a) long.
- * @nbytes:	in/out param - it has the be set to the maximum number of
- *		bytes that can be written to sgl. This has to be at least
- *		the size of the integer a. On return it receives the actual
- *		length of the data written on success or the data that would
- *		be written if buffer was too small.
+ * @nbytes:	the number of bytes to write.  Leading bytes will be
+ *		filled with zero.
  * @sign:	if not NULL, it will be set to the sign of a.
  *
  * Return:	0 on success or error code in case of error
  */
-int mpi_write_to_sgl(MPI a, struct scatterlist *sgl, unsigned *nbytes,
+int mpi_write_to_sgl(MPI a, struct scatterlist *sgl, unsigned nbytes,
 		     int *sign)
 {
 	u8 *p, *p2;
@@ -258,55 +256,60 @@ int mpi_write_to_sgl(MPI a, struct scatterlist *sgl, unsigned *nbytes,
 #error please implement for this limb size.
 #endif
 	unsigned int n = mpi_get_size(a);
-	int i, x, y = 0, lzeros, buf_len;
-
-	if (!nbytes)
-		return -EINVAL;
+	struct sg_mapping_iter miter;
+	int i, x, buf_len;
+	int nents;
 
 	if (sign)
 		*sign = a->sign;
 
-	lzeros = count_lzeros(a);
-
-	if (*nbytes < n - lzeros) {
-		*nbytes = n - lzeros;
+	if (nbytes < n)
 		return -EOVERFLOW;
+
+	nents = sg_nents_for_len(sgl, nbytes);
+	if (nents < 0)
+		return -EINVAL;
+
+	sg_miter_start(&miter, sgl, nents, SG_MITER_ATOMIC | SG_MITER_TO_SG);
+	sg_miter_next(&miter);
+	buf_len = miter.length;
+	p2 = miter.addr;
+
+	while (nbytes > n) {
+		i = min_t(unsigned, nbytes - n, buf_len);
+		memset(p2, 0, i);
+		p2 += i;
+		nbytes -= i;
+
+		buf_len -= i;
+		if (!buf_len) {
+			sg_miter_next(&miter);
+			buf_len = miter.length;
+			p2 = miter.addr;
+		}
 	}
 
-	*nbytes = n - lzeros;
-	buf_len = sgl->length;
-	p2 = sg_virt(sgl);
-
-	for (i = a->nlimbs - 1 - lzeros / BYTES_PER_MPI_LIMB,
-			lzeros %= BYTES_PER_MPI_LIMB;
-		i >= 0; i--) {
+	for (i = a->nlimbs - 1; i >= 0; i--) {
 #if BYTES_PER_MPI_LIMB == 4
-		alimb = cpu_to_be32(a->d[i]);
+		alimb = a->d[i] ? cpu_to_be32(a->d[i]) : 0;
 #elif BYTES_PER_MPI_LIMB == 8
-		alimb = cpu_to_be64(a->d[i]);
+		alimb = a->d[i] ? cpu_to_be64(a->d[i]) : 0;
 #else
 #error please implement for this limb size.
 #endif
-		if (lzeros) {
-			y = lzeros;
-			lzeros = 0;
-		}
+		p = (u8 *)&alimb;
 
-		p = (u8 *)&alimb + y;
-
-		for (x = 0; x < sizeof(alimb) - y; x++) {
-			if (!buf_len) {
-				sgl = sg_next(sgl);
-				if (!sgl)
-					return -EINVAL;
-				buf_len = sgl->length;
-				p2 = sg_virt(sgl);
-			}
+		for (x = 0; x < sizeof(alimb); x++) {
 			*p2++ = *p++;
-			buf_len--;
+			if (!--buf_len) {
+				sg_miter_next(&miter);
+				buf_len = miter.length;
+				p2 = miter.addr;
+			}
 		}
-		y = 0;
 	}
+
+	sg_miter_stop(&miter);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mpi_write_to_sgl);
@@ -326,19 +329,23 @@ EXPORT_SYMBOL_GPL(mpi_write_to_sgl);
  */
 MPI mpi_read_raw_from_sgl(struct scatterlist *sgl, unsigned int nbytes)
 {
-	struct scatterlist *sg;
-	int x, i, j, z, lzeros, ents;
+	struct sg_mapping_iter miter;
 	unsigned int nbits, nlimbs;
+	int x, j, z, lzeros, ents;
+	unsigned int len;
+	const u8 *buff;
 	mpi_limb_t a;
 	MPI val = NULL;
 
+	ents = sg_nents_for_len(sgl, nbytes);
+	if (ents < 0)
+		return NULL;
+
+	sg_miter_start(&miter, sgl, ents, SG_MITER_ATOMIC | SG_MITER_FROM_SG);
+
 	lzeros = 0;
-	ents = sg_nents(sgl);
-
-	for_each_sg(sgl, sg, ents, i) {
-		const u8 *buff = sg_virt(sg);
-		int len = sg->length;
-
+	len = 0;
+	while (nbytes > 0) {
 		while (len && !*buff) {
 			lzeros++;
 			len--;
@@ -348,12 +355,17 @@ MPI mpi_read_raw_from_sgl(struct scatterlist *sgl, unsigned int nbytes)
 		if (len && *buff)
 			break;
 
-		ents--;
+		sg_miter_next(&miter);
+		buff = miter.addr;
+		len = miter.length;
+
 		nbytes -= lzeros;
 		lzeros = 0;
 	}
 
-	sgl = sg;
+	miter.consumed = lzeros;
+	sg_miter_stop(&miter);
+
 	nbytes -= lzeros;
 	nbits = nbytes * 8;
 	if (nbits > MAX_EXTERN_MPI_BITS) {
@@ -362,8 +374,7 @@ MPI mpi_read_raw_from_sgl(struct scatterlist *sgl, unsigned int nbytes)
 	}
 
 	if (nbytes > 0)
-		nbits -= count_leading_zeros(*(u8 *)(sg_virt(sgl) + lzeros)) -
-			(BITS_PER_LONG - 8);
+		nbits -= count_leading_zeros(*buff) - (BITS_PER_LONG - 8);
 
 	nlimbs = DIV_ROUND_UP(nbytes, BYTES_PER_MPI_LIMB);
 	val = mpi_alloc(nlimbs);
@@ -382,21 +393,21 @@ MPI mpi_read_raw_from_sgl(struct scatterlist *sgl, unsigned int nbytes)
 	z = BYTES_PER_MPI_LIMB - nbytes % BYTES_PER_MPI_LIMB;
 	z %= BYTES_PER_MPI_LIMB;
 
-	for_each_sg(sgl, sg, ents, i) {
-		const u8 *buffer = sg_virt(sg) + lzeros;
-		int len = sg->length - lzeros;
+	while (sg_miter_next(&miter)) {
+		buff = miter.addr;
+		len = miter.length;
 
 		for (x = 0; x < len; x++) {
 			a <<= 8;
-			a |= *buffer++;
+			a |= *buff++;
 			if (((z + x + 1) % BYTES_PER_MPI_LIMB) == 0) {
 				val->d[j--] = a;
 				a = 0;
 			}
 		}
 		z += x;
-		lzeros = 0;
 	}
+
 	return val;
 }
 EXPORT_SYMBOL_GPL(mpi_read_raw_from_sgl);

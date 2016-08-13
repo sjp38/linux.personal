@@ -21,20 +21,20 @@
 enum major_op {
 	spec_op, bcond_op, j_op, jal_op,
 	beq_op, bne_op, blez_op, bgtz_op,
-	addi_op, cbcond0_op = addi_op, addiu_op, slti_op, sltiu_op,
+	addi_op, pop10_op = addi_op, addiu_op, slti_op, sltiu_op,
 	andi_op, ori_op, xori_op, lui_op,
 	cop0_op, cop1_op, cop2_op, cop1x_op,
 	beql_op, bnel_op, blezl_op, bgtzl_op,
-	daddi_op, cbcond1_op = daddi_op, daddiu_op, ldl_op, ldr_op,
+	daddi_op, pop30_op = daddi_op, daddiu_op, ldl_op, ldr_op,
 	spec2_op, jalx_op, mdmx_op, msa_op = mdmx_op, spec3_op,
 	lb_op, lh_op, lwl_op, lw_op,
 	lbu_op, lhu_op, lwr_op, lwu_op,
 	sb_op, sh_op, swl_op, sw_op,
 	sdl_op, sdr_op, swr_op, cache_op,
 	ll_op, lwc1_op, lwc2_op, bc6_op = lwc2_op, pref_op,
-	lld_op, ldc1_op, ldc2_op, beqzcjic_op = ldc2_op, ld_op,
+	lld_op, ldc1_op, ldc2_op, pop66_op = ldc2_op, ld_op,
 	sc_op, swc1_op, swc2_op, balc6_op = swc2_op, major_3b_op,
-	scd_op, sdc1_op, sdc2_op, bnezcjialc_op = sdc2_op, sd_op
+	scd_op, sdc1_op, sdc2_op, pop76_op = sdc2_op, sd_op
 };
 
 /*
@@ -90,6 +90,50 @@ enum spec3_op {
 	lwe_op    = 0x2f, pref6_op  = 0x35,
 	ll6_op    = 0x36, lld6_op   = 0x37,
 	rdhwr_op  = 0x3b
+};
+
+/*
+ * Bits 10-6 minor opcode for r6 spec mult/div encodings
+ */
+enum mult_op {
+	mult_mult_op = 0x0,
+	mult_mul_op = 0x2,
+	mult_muh_op = 0x3,
+};
+enum multu_op {
+	multu_multu_op = 0x0,
+	multu_mulu_op = 0x2,
+	multu_muhu_op = 0x3,
+};
+enum div_op {
+	div_div_op = 0x0,
+	div_div6_op = 0x2,
+	div_mod_op = 0x3,
+};
+enum divu_op {
+	divu_divu_op = 0x0,
+	divu_divu6_op = 0x2,
+	divu_modu_op = 0x3,
+};
+enum dmult_op {
+	dmult_dmult_op = 0x0,
+	dmult_dmul_op = 0x2,
+	dmult_dmuh_op = 0x3,
+};
+enum dmultu_op {
+	dmultu_dmultu_op = 0x0,
+	dmultu_dmulu_op = 0x2,
+	dmultu_dmuhu_op = 0x3,
+};
+enum ddiv_op {
+	ddiv_ddiv_op = 0x0,
+	ddiv_ddiv6_op = 0x2,
+	ddiv_dmod_op = 0x3,
+};
+enum ddivu_op {
+	ddivu_ddivu_op = 0x0,
+	ddivu_ddivu6_op = 0x2,
+	ddivu_dmodu_op = 0x3,
 };
 
 /*
@@ -238,6 +282,21 @@ enum bshfl_func {
 };
 
 /*
+ * MSA minor opcodes.
+ */
+enum msa_func {
+	msa_elm_op = 0x19,
+};
+
+/*
+ * MSA ELM opcodes.
+ */
+enum msa_elm {
+	msa_ctc_op = 0x3e,
+	msa_cfc_op = 0x7e,
+};
+
+/*
  * func field for MSA MI10 format.
  */
 enum msa_mi10_func {
@@ -264,7 +323,7 @@ enum mm_major_op {
 	mm_pool32b_op, mm_pool16b_op, mm_lhu16_op, mm_andi16_op,
 	mm_addiu32_op, mm_lhu32_op, mm_sh32_op, mm_lh32_op,
 	mm_pool32i_op, mm_pool16c_op, mm_lwsp16_op, mm_pool16d_op,
-	mm_ori32_op, mm_pool32f_op, mm_reserved1_op, mm_reserved2_op,
+	mm_ori32_op, mm_pool32f_op, mm_pool32s_op, mm_reserved2_op,
 	mm_pool32c_op, mm_lwgp16_op, mm_lw16_op, mm_pool16e_op,
 	mm_xori32_op, mm_jals32_op, mm_addiupc_op, mm_reserved3_op,
 	mm_reserved4_op, mm_pool16f_op, mm_sb16_op, mm_beqz16_op,
@@ -360,7 +419,10 @@ enum mm_32axf_minor_op {
 	mm_mflo32_op = 0x075,
 	mm_jalrhb_op = 0x07c,
 	mm_tlbwi_op = 0x08d,
+	mm_mthi32_op = 0x0b5,
 	mm_tlbwr_op = 0x0cd,
+	mm_mtlo32_op = 0x0f5,
+	mm_di_op = 0x11d,
 	mm_jalrs_op = 0x13c,
 	mm_jalrshb_op = 0x17c,
 	mm_sync_op = 0x1ad,
@@ -476,6 +538,13 @@ enum mm_32f_73_minor_op {
 	mm_mthc1_op = 0xe0,
 	mm_froundw_op = 0xec,
 	mm_fcvts1_op = 0xed,
+};
+
+/*
+ * (microMIPS) POOL32S minor opcodes.
+ */
+enum mm_32s_minor_op {
+	mm_32s_elm_op = 0x16,
 };
 
 /*

@@ -172,7 +172,7 @@ static void __drop_largest_extent(struct inode *inode,
 
 	if (fofs < largest->fofs + largest->len && fofs + len > largest->fofs) {
 		largest->len = 0;
-		mark_inode_dirty_sync(inode);
+		f2fs_mark_inode_dirty_sync(inode);
 	}
 }
 
@@ -629,6 +629,19 @@ unsigned int f2fs_destroy_extent_node(struct inode *inode)
 	write_unlock(&et->lock);
 
 	return node_cnt;
+}
+
+void f2fs_drop_extent_tree(struct inode *inode)
+{
+	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+	struct extent_tree *et = F2FS_I(inode)->extent_tree;
+
+	set_inode_flag(inode, FI_NO_EXTENT);
+
+	write_lock(&et->lock);
+	__free_extent_tree(sbi, et);
+	__drop_largest_extent(inode, 0, UINT_MAX);
+	write_unlock(&et->lock);
 }
 
 void f2fs_destroy_extent_tree(struct inode *inode)

@@ -18,12 +18,12 @@
 #define R8A7792_CLK_LB			4
 #define R8A7792_CLK_QSPI		5
 #define R8A7792_CLK_Z			6
-#define R8A7792_CLK_ADSP		7
 
 /* MSTP0 */
 #define R8A7792_CLK_MSIOF0		0
 
 /* MSTP1 */
+#define R8A7792_CLK_JPU			6
 #define R8A7792_CLK_TMU1		11
 #define R8A7792_CLK_TMU3		21
 #define R8A7792_CLK_TMU2		22

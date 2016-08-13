@@ -1,5 +1,5 @@
-/******************************************************************************
- * Nuvoton TPM I2C Device Driver Interface for WPCT301/NPCT501,
+ /******************************************************************************
+ * Nuvoton TPM I2C Device Driver Interface for WPCT301/NPCT501/NPCT6XX,
  * based on the TCG TPM Interface Spec version 1.2.
  * Specifications at www.trustedcomputinggroup.org
  *
@@ -31,6 +31,7 @@
 #include <linux/interrupt.h>
 #include <linux/wait.h>
 #include <linux/i2c.h>
+#include <linux/of_device.h>
 #include "tpm.h"
 
 /* I2C interface offsets */
@@ -52,7 +53,8 @@
 #define TPM_I2C_RETRY_DELAY_SHORT      2       /* msec */
 #define TPM_I2C_RETRY_DELAY_LONG       10      /* msec */
 
-#define I2C_DRIVER_NAME "tpm_i2c_nuvoton"
+#define OF_IS_TPM2 ((void *)1)
+#define I2C_IS_TPM2 1
 
 struct priv_data {
 	int irq;
@@ -165,7 +167,7 @@ static int i2c_nuvoton_get_burstcount(struct i2c_client *client,
 }
 
 /*
- * WPCT301/NPCT501 SINT# supports only dataAvail
+ * WPCT301/NPCT501/NPCT6XX SINT# supports only dataAvail
  * any call to this function which is not waiting for dataAvail will
  * set queue to NULL to avoid waiting for interrupt
  */
@@ -461,6 +463,7 @@ static bool i2c_nuvoton_req_canceled(struct tpm_chip *chip, u8 status)
 }
 
 static const struct tpm_class_ops tpm_i2c = {
+	.flags = TPM_OPS_AUTO_STARTUP,
 	.status = i2c_nuvoton_read_status,
 	.recv = i2c_nuvoton_recv,
 	.send = i2c_nuvoton_send,
@@ -544,6 +547,16 @@ static int i2c_nuvoton_probe(struct i2c_client *client,
 	if (!priv)
 		return -ENOMEM;
 
+	if (dev->of_node) {
+		const struct of_device_id *of_id;
+
+		of_id = of_match_device(dev->driver->of_match_table, dev);
+		if (of_id && of_id->data == OF_IS_TPM2)
+			chip->flags |= TPM_CHIP_FLAG_TPM2;
+	} else
+		if (id->driver_data == I2C_IS_TPM2)
+			chip->flags |= TPM_CHIP_FLAG_TPM2;
+
 	init_waitqueue_head(&priv->read_queue);
 
 	/* Default timeouts */
@@ -559,10 +572,8 @@ static int i2c_nuvoton_probe(struct i2c_client *client,
 	 *   TPM_INTF_INT_LEVEL_LOW | TPM_INTF_DATA_AVAIL_INT
 	 * The IRQ should be set in the i2c_board_info (which is done
 	 * automatically in of_i2c_register_devices, for device tree users */
-	chip->flags |= TPM_CHIP_FLAG_IRQ;
 	priv->irq = client->irq;
-
-	if (chip->flags & TPM_CHIP_FLAG_IRQ) {
+	if (client->irq) {
 		dev_dbg(dev, "%s() priv->irq\n", __func__);
 		rc = devm_request_irq(dev, client->irq,
 				      i2c_nuvoton_int_handler,
@@ -572,9 +583,9 @@ static int i2c_nuvoton_probe(struct i2c_client *client,
 		if (rc) {
 			dev_err(dev, "%s() Unable to request irq: %d for use\n",
 				__func__, priv->irq);
-			chip->flags &= ~TPM_CHIP_FLAG_IRQ;
 			priv->irq = 0;
 		} else {
+			chip->flags |= TPM_CHIP_FLAG_IRQ;
 			/* Clear any pending interrupt */
 			i2c_nuvoton_ready(chip);
 			/* - wait for TPM_STS==0xA0 (stsValid, commandReady) */
@@ -609,12 +620,6 @@ static int i2c_nuvoton_probe(struct i2c_client *client,
 		}
 	}
 
-	if (tpm_get_timeouts(chip))
-		return -ENODEV;
-
-	if (tpm_do_selftest(chip))
-		return -ENODEV;
-
 	return tpm_chip_register(chip);
 }
 
@@ -627,7 +632,8 @@ static int i2c_nuvoton_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id i2c_nuvoton_id[] = {
-	{I2C_DRIVER_NAME, 0},
+	{"tpm_i2c_nuvoton"},
+	{"tpm2_i2c_nuvoton", .driver_data = I2C_IS_TPM2},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, i2c_nuvoton_id);
@@ -636,6 +642,7 @@ MODULE_DEVICE_TABLE(i2c, i2c_nuvoton_id);
 static const struct of_device_id i2c_nuvoton_of_match[] = {
 	{.compatible = "nuvoton,npct501"},
 	{.compatible = "winbond,wpct301"},
+	{.compatible = "nuvoton,npct601", .data = OF_IS_TPM2},
 	{},
 };
 MODULE_DEVICE_TABLE(of, i2c_nuvoton_of_match);
@@ -648,7 +655,7 @@ static struct i2c_driver i2c_nuvoton_driver = {
 	.probe = i2c_nuvoton_probe,
 	.remove = i2c_nuvoton_remove,
 	.driver = {
-		.name = I2C_DRIVER_NAME,
+		.name = "tpm_i2c_nuvoton",
 		.pm = &i2c_nuvoton_pm_ops,
 		.of_match_table = of_match_ptr(i2c_nuvoton_of_match),
 	},

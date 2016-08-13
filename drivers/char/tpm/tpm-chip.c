@@ -213,11 +213,13 @@ struct tpm_chip *tpmm_chip_alloc(struct device *pdev,
 	if (IS_ERR(chip))
 		return chip;
 
-	rc = devm_add_action(pdev, (void (*)(void *)) put_device, &chip->dev);
-	if (rc) {
-		put_device(&chip->dev);
+	rc = devm_add_action_or_reset(pdev,
+				      (void (*)(void *)) put_device,
+				      &chip->dev);
+	if (rc)
 		return ERR_PTR(rc);
-	}
+
+	dev_set_drvdata(pdev, chip);
 
 	dev_set_drvdata(pdev, chip);
 
@@ -353,6 +355,15 @@ static int tpm_add_legacy_sysfs(struct tpm_chip *chip)
 int tpm_chip_register(struct tpm_chip *chip)
 {
 	int rc;
+
+	if (chip->ops->flags & TPM_OPS_AUTO_STARTUP) {
+		if (chip->flags & TPM_CHIP_FLAG_TPM2)
+			rc = tpm2_auto_startup(chip);
+		else
+			rc = tpm1_auto_startup(chip);
+		if (rc)
+			return rc;
+	}
 
 	rc = tpm1_chip_register(chip);
 	if (rc)

@@ -630,6 +630,7 @@ struct r8152 {
 		int (*eee_get)(struct r8152 *, struct ethtool_eee *);
 		int (*eee_set)(struct r8152 *, struct ethtool_eee *);
 		bool (*in_nway)(struct r8152 *);
+		void (*hw_phy_cfg)(struct r8152 *);
 		void (*autosuspend_en)(struct r8152 *tp, bool enable);
 	} rtl_ops;
 
@@ -2515,27 +2516,6 @@ static void rtl8153_runtime_enable(struct r8152 *tp, bool enable)
 	}
 }
 
-static void rtl_phy_reset(struct r8152 *tp)
-{
-	u16 data;
-	int i;
-
-	data = r8152_mdio_read(tp, MII_BMCR);
-
-	/* don't reset again before the previous one complete */
-	if (data & BMCR_RESET)
-		return;
-
-	data |= BMCR_RESET;
-	r8152_mdio_write(tp, MII_BMCR, data);
-
-	for (i = 0; i < 50; i++) {
-		msleep(20);
-		if ((r8152_mdio_read(tp, MII_BMCR) & BMCR_RESET) == 0)
-			break;
-	}
-}
-
 static void r8153_teredo_off(struct r8152 *tp)
 {
 	u32 ocp_data;
@@ -2915,7 +2895,6 @@ static int rtl8152_set_speed(struct r8152 *tp, u8 autoneg, u16 speed, u8 duplex)
 	u16 bmcr, anar, gbcr;
 	int ret = 0;
 
-	cancel_delayed_work_sync(&tp->schedule);
 	anar = r8152_mdio_read(tp, MII_ADVERTISE);
 	anar &= ~(ADVERTISE_10HALF | ADVERTISE_10FULL |
 		  ADVERTISE_100HALF | ADVERTISE_100FULL);
@@ -3134,9 +3113,6 @@ static void rtl_work_func_t(struct work_struct *work)
 	    netif_carrier_ok(tp->netdev))
 		napi_schedule(&tp->napi);
 
-	if (test_and_clear_bit(PHY_RESET, &tp->flags))
-		rtl_phy_reset(tp);
-
 	mutex_unlock(&tp->control);
 
 out1:
@@ -3199,8 +3175,6 @@ static int rtl8152_open(struct net_device *netdev)
 	res = alloc_all_mem(tp);
 	if (res)
 		goto out;
-
-	netif_carrier_off(netdev);
 
 	res = usb_autopm_get_interface(tp->intf);
 	if (res < 0) {
@@ -4241,6 +4215,7 @@ static int rtl_ops_init(struct r8152 *tp)
 		ops->eee_get		= r8152_get_eee;
 		ops->eee_set		= r8152_set_eee;
 		ops->in_nway		= rtl8152_in_nway;
+		ops->hw_phy_cfg		= r8152b_hw_phy_cfg;
 		ops->autosuspend_en	= rtl_runtime_suspend_enable;
 		break;
 
@@ -4257,6 +4232,7 @@ static int rtl_ops_init(struct r8152 *tp)
 		ops->eee_get		= r8153_get_eee;
 		ops->eee_set		= r8153_set_eee;
 		ops->in_nway		= rtl8153_in_nway;
+		ops->hw_phy_cfg		= r8153_hw_phy_cfg;
 		ops->autosuspend_en	= rtl8153_runtime_enable;
 		break;
 

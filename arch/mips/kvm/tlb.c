@@ -176,7 +176,7 @@ int kvm_mips_handle_commpage_tlb_fault(unsigned long badvaddr,
 	unsigned long entrylo[2] = { 0, 0 };
 	unsigned int pair_idx;
 
-	pfn = CPHYSADDR(vcpu->arch.kseg0_commpage) >> PAGE_SHIFT;
+	pfn = PFN_DOWN(virt_to_phys(vcpu->arch.kseg0_commpage));
 	pair_idx = (badvaddr >> PAGE_SHIFT) & 1;
 	entrylo[pair_idx] = mips3_paddr_to_tlbpfn(pfn << PAGE_SHIFT) |
 		((_page_cachable_default >> _CACHE_SHIFT) << ENTRYLO_C_SHIFT) |
@@ -332,6 +332,8 @@ void kvm_mips_flush_host_tlb(int skip_kseg0)
 			/* Don't blow away guest kernel entries */
 			if (KVM_GUEST_KSEGX(entryhi) == KVM_GUEST_KSEG0)
 				continue;
+
+			write_c0_pagemask(old_pagemask);
 		}
 
 		/* Make sure all entries differ. */

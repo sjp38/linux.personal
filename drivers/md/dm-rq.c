@@ -78,6 +78,7 @@ void dm_start_queue(struct request_queue *q)
 	if (!q->mq_ops)
 		dm_old_start_queue(q);
 	else {
+		queue_flag_clear_unlocked(QUEUE_FLAG_STOPPED, q);
 		blk_mq_start_stopped_hw_queues(q, true);
 		blk_mq_kick_requeue_list(q);
 	}
@@ -101,8 +102,14 @@ void dm_stop_queue(struct request_queue *q)
 {
 	if (!q->mq_ops)
 		dm_old_stop_queue(q);
-	else
+	else {
+		spin_lock_irq(q->queue_lock);
+		queue_flag_set(QUEUE_FLAG_STOPPED, q);
+		spin_unlock_irq(q->queue_lock);
+
+		blk_mq_cancel_requeue_work(q);
 		blk_mq_stop_hw_queues(q);
+	}
 }
 
 static struct dm_rq_target_io *alloc_old_rq_tio(struct mapped_device *md,
@@ -785,7 +792,7 @@ static void dm_old_request_fn(struct request_queue *q)
 		     md_in_flight(md) && rq->bio && rq->bio->bi_vcnt == 1 &&
 		     md->last_rq_pos == pos && md->last_rq_rw == rq_data_dir(rq)) ||
 		    (ti->type->busy && ti->type->busy(ti))) {
-			blk_delay_queue(q, HZ / 100);
+			blk_delay_queue(q, 10);
 			return;
 		}
 
@@ -819,6 +826,8 @@ int dm_old_init_request_queue(struct mapped_device *md)
 	init_kthread_worker(&md->kworker);
 	md->kworker_task = kthread_run(kthread_worker_fn, &md->kworker,
 				       "kdmwork-%s", dm_device_name(md));
+	if (IS_ERR(md->kworker_task))
+		return PTR_ERR(md->kworker_task);
 
 	elv_register_queue(md->queue);
 
@@ -861,6 +870,17 @@ static int dm_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
 		ti = dm_table_find_target(map, 0);
 		dm_put_live_table(md, srcu_idx);
 	}
+
+	/*
+	 * On suspend dm_stop_queue() handles stopping the blk-mq
+	 * request_queue BUT: even though the hw_queues are marked
+	 * BLK_MQ_S_STOPPED at that point there is still a race that
+	 * is allowing block/blk-mq.c to call ->queue_rq against a
+	 * hctx that it really shouldn't.  The following check guards
+	 * against this rarity (albeit _not_ race-free).
+	 */
+	if (unlikely(test_bit(BLK_MQ_S_STOPPED, &hctx->state)))
+		return BLK_MQ_RQ_QUEUE_BUSY;
 
 	if (ti->type->busy && ti->type->busy(ti))
 		return BLK_MQ_RQ_QUEUE_BUSY;

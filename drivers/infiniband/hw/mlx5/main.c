@@ -1708,21 +1708,18 @@ static struct mlx5_ib_flow_handler *create_flow_rule(struct mlx5_ib_dev *dev,
 {
 	struct mlx5_flow_table	*ft = ft_prio->flow_table;
 	struct mlx5_ib_flow_handler *handler;
+	struct mlx5_flow_spec *spec;
 	void *ib_flow = flow_attr + 1;
-	u8 match_criteria_enable = 0;
 	unsigned int spec_index;
-	u32 *match_c;
-	u32 *match_v;
 	u32 action;
 	int err = 0;
 
 	if (!is_valid_attr(flow_attr))
 		return ERR_PTR(-EINVAL);
 
-	match_c = kzalloc(MLX5_ST_SZ_BYTES(fte_match_param), GFP_KERNEL);
-	match_v = kzalloc(MLX5_ST_SZ_BYTES(fte_match_param), GFP_KERNEL);
+	spec = mlx5_vzalloc(sizeof(*spec));
 	handler = kzalloc(sizeof(*handler), GFP_KERNEL);
-	if (!handler || !match_c || !match_v) {
+	if (!handler || !spec) {
 		err = -ENOMEM;
 		goto free;
 	}
@@ -1730,7 +1727,8 @@ static struct mlx5_ib_flow_handler *create_flow_rule(struct mlx5_ib_dev *dev,
 	INIT_LIST_HEAD(&handler->list);
 
 	for (spec_index = 0; spec_index < flow_attr->num_of_specs; spec_index++) {
-		err = parse_flow_attr(match_c, match_v, ib_flow);
+		err = parse_flow_attr(spec->match_criteria,
+				      spec->match_value, ib_flow);
 		if (err < 0)
 			goto free;
 
@@ -1738,11 +1736,11 @@ static struct mlx5_ib_flow_handler *create_flow_rule(struct mlx5_ib_dev *dev,
 	}
 
 	/* Outer header support only */
-	match_criteria_enable = (!outer_header_zero(match_c)) << 0;
+	spec->match_criteria_enable = (!outer_header_zero(spec->match_criteria))
+		<< 0;
 	action = dst ? MLX5_FLOW_CONTEXT_ACTION_FWD_DEST :
 		MLX5_FLOW_CONTEXT_ACTION_FWD_NEXT_PRIO;
-	handler->rule = mlx5_add_flow_rule(ft, match_criteria_enable,
-					   match_c, match_v,
+	handler->rule = mlx5_add_flow_rule(ft, spec,
 					   action,
 					   MLX5_FS_DEFAULT_FLOW_TAG,
 					   dst);
@@ -1758,8 +1756,7 @@ static struct mlx5_ib_flow_handler *create_flow_rule(struct mlx5_ib_dev *dev,
 free:
 	if (err)
 		kfree(handler);
-	kfree(match_c);
-	kfree(match_v);
+	kvfree(spec);
 	return err ? ERR_PTR(err) : handler;
 }
 
@@ -1984,15 +1981,6 @@ static ssize_t show_hca(struct device *device, struct device_attribute *attr,
 	return sprintf(buf, "MT%d\n", dev->mdev->pdev->device);
 }
 
-static ssize_t show_fw_ver(struct device *device, struct device_attribute *attr,
-			   char *buf)
-{
-	struct mlx5_ib_dev *dev =
-		container_of(device, struct mlx5_ib_dev, ib_dev.dev);
-	return sprintf(buf, "%d.%d.%04d\n", fw_rev_maj(dev->mdev),
-		       fw_rev_min(dev->mdev), fw_rev_sub(dev->mdev));
-}
-
 static ssize_t show_rev(struct device *device, struct device_attribute *attr,
 			char *buf)
 {
@@ -2011,7 +1999,6 @@ static ssize_t show_board(struct device *device, struct device_attribute *attr,
 }
 
 static DEVICE_ATTR(hw_rev,   S_IRUGO, show_rev,    NULL);
-static DEVICE_ATTR(fw_ver,   S_IRUGO, show_fw_ver, NULL);
 static DEVICE_ATTR(hca_type, S_IRUGO, show_hca,    NULL);
 static DEVICE_ATTR(board_id, S_IRUGO, show_board,  NULL);
 static DEVICE_ATTR(fw_pages, S_IRUGO, show_fw_pages, NULL);
@@ -2019,7 +2006,6 @@ static DEVICE_ATTR(reg_pages, S_IRUGO, show_reg_pages, NULL);
 
 static struct device_attribute *mlx5_class_attributes[] = {
 	&dev_attr_hw_rev,
-	&dev_attr_fw_ver,
 	&dev_attr_hca_type,
 	&dev_attr_board_id,
 	&dev_attr_fw_pages,
@@ -2515,6 +2501,15 @@ static int mlx5_port_immutable(struct ib_device *ibdev, u8 port_num,
 	return 0;
 }
 
+static void get_dev_fw_str(struct ib_device *ibdev, char *str,
+			   size_t str_len)
+{
+	struct mlx5_ib_dev *dev =
+		container_of(ibdev, struct mlx5_ib_dev, ib_dev);
+	snprintf(str, str_len, "%d.%d.%04d", fw_rev_maj(dev->mdev),
+		       fw_rev_min(dev->mdev), fw_rev_sub(dev->mdev));
+}
+
 static int mlx5_enable_roce(struct mlx5_ib_dev *dev)
 {
 	int err;
@@ -2576,7 +2571,7 @@ dealloc_counters:
 	return ret;
 }
 
-static const char const *names[] = {
+static const char * const names[] = {
 	"rx_write_requests",
 	"rx_read_requests",
 	"rx_atomic_requests",
@@ -2773,6 +2768,7 @@ static void *mlx5_ib_add(struct mlx5_core_dev *mdev)
 	dev->ib_dev.map_mr_sg		= mlx5_ib_map_mr_sg;
 	dev->ib_dev.check_mr_status	= mlx5_ib_check_mr_status;
 	dev->ib_dev.get_port_immutable  = mlx5_port_immutable;
+	dev->ib_dev.get_dev_fw_str      = get_dev_fw_str;
 	if (mlx5_core_is_pf(mdev)) {
 		dev->ib_dev.get_vf_config	= mlx5_ib_get_vf_config;
 		dev->ib_dev.set_vf_link_state	= mlx5_ib_set_vf_link_state;

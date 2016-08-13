@@ -79,7 +79,7 @@ int rockchip_register_crtc_funcs(struct drm_crtc *crtc,
 	int pipe = drm_crtc_index(crtc);
 	struct rockchip_drm_private *priv = crtc->dev->dev_private;
 
-	if (pipe > ROCKCHIP_MAX_CRTC)
+	if (pipe >= ROCKCHIP_MAX_CRTC)
 		return -EINVAL;
 
 	priv->crtc_funcs[pipe] = crtc_funcs;
@@ -92,7 +92,7 @@ void rockchip_unregister_crtc_funcs(struct drm_crtc *crtc)
 	int pipe = drm_crtc_index(crtc);
 	struct rockchip_drm_private *priv = crtc->dev->dev_private;
 
-	if (pipe > ROCKCHIP_MAX_CRTC)
+	if (pipe >= ROCKCHIP_MAX_CRTC)
 		return;
 
 	priv->crtc_funcs[pipe] = NULL;
@@ -146,16 +146,12 @@ static int rockchip_drm_bind(struct device *dev)
 	if (!drm_dev)
 		return -ENOMEM;
 
-	ret = drm_dev_register(drm_dev, 0);
-	if (ret)
-		goto err_free;
-
 	dev_set_drvdata(dev, drm_dev);
 
 	private = devm_kzalloc(drm_dev->dev, sizeof(*private), GFP_KERNEL);
 	if (!private) {
 		ret = -ENOMEM;
-		goto err_unregister;
+		goto err_free;
 	}
 
 	drm_dev->dev_private = private;
@@ -197,12 +193,6 @@ static int rockchip_drm_bind(struct device *dev)
 	if (ret)
 		goto err_detach_device;
 
-	ret = drm_connector_register_all(drm_dev);
-	if (ret) {
-		dev_err(dev, "failed to register connectors\n");
-		goto err_unbind;
-	}
-
 	/* init kms poll for handling hpd */
 	drm_kms_helper_poll_init(drm_dev);
 
@@ -222,14 +212,19 @@ static int rockchip_drm_bind(struct device *dev)
 	if (ret)
 		goto err_vblank_cleanup;
 
+	ret = drm_dev_register(drm_dev, 0);
+	if (ret)
+		goto err_fbdev_fini;
+
 	if (is_support_iommu)
 		arm_iommu_release_mapping(mapping);
 	return 0;
+err_fbdev_fini:
+	rockchip_drm_fbdev_fini(drm_dev);
 err_vblank_cleanup:
 	drm_vblank_cleanup(drm_dev);
 err_kms_helper_poll_fini:
 	drm_kms_helper_poll_fini(drm_dev);
-err_unbind:
 	component_unbind_all(dev, drm_dev);
 err_detach_device:
 	if (is_support_iommu)
@@ -240,8 +235,6 @@ err_release_mapping:
 err_config_cleanup:
 	drm_mode_config_cleanup(drm_dev);
 	drm_dev->dev_private = NULL;
-err_unregister:
-	drm_dev_unregister(drm_dev);
 err_free:
 	drm_dev_unref(drm_dev);
 	return ret;
@@ -264,7 +257,7 @@ static void rockchip_drm_unbind(struct device *dev)
 	dev_set_drvdata(dev, NULL);
 }
 
-void rockchip_drm_lastclose(struct drm_device *dev)
+static void rockchip_drm_lastclose(struct drm_device *dev)
 {
 	struct rockchip_drm_private *priv = dev->dev_private;
 
@@ -445,9 +438,8 @@ static int rockchip_drm_platform_probe(struct platform_device *pdev)
 			is_support_iommu = false;
 		}
 
-		of_node_get(port->parent);
-		component_match_add_release(dev, &match, release_of,
-					    compare_of, port->parent);
+		of_node_put(iommu);
+		component_match_add(dev, &match, compare_of, port->parent);
 		of_node_put(port);
 	}
 

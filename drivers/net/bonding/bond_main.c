@@ -1422,7 +1422,16 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 		return -EINVAL;
 	}
 
-	if (slave_ops->ndo_set_mac_address == NULL) {
+	if (slave_dev->type == ARPHRD_INFINIBAND &&
+	    BOND_MODE(bond) != BOND_MODE_ACTIVEBACKUP) {
+		netdev_warn(bond_dev, "Type (%d) supports only active-backup mode\n",
+			    slave_dev->type);
+		res = -EOPNOTSUPP;
+		goto err_undo_flags;
+	}
+
+	if (!slave_ops->ndo_set_mac_address ||
+	    slave_dev->type == ARPHRD_INFINIBAND) {
 		netdev_warn(bond_dev, "The slave device specified does not support setting the MAC address\n");
 		if (BOND_MODE(bond) == BOND_MODE_ACTIVEBACKUP &&
 		    bond->params.fail_over_mac != BOND_FOM_ACTIVE) {
@@ -4138,6 +4147,8 @@ static const struct net_device_ops bond_netdev_ops = {
 	.ndo_add_slave		= bond_enslave,
 	.ndo_del_slave		= bond_release,
 	.ndo_fix_features	= bond_fix_features,
+	.ndo_neigh_construct	= netdev_default_l2upper_neigh_construct,
+	.ndo_neigh_destroy	= netdev_default_l2upper_neigh_destroy,
 	.ndo_bridge_setlink	= switchdev_port_bridge_setlink,
 	.ndo_bridge_getlink	= switchdev_port_bridge_getlink,
 	.ndo_bridge_dellink	= switchdev_port_bridge_dellink,

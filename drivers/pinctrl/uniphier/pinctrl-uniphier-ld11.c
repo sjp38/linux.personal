@@ -151,22 +151,22 @@ static const struct pinctrl_pin_desc uniphier_ld11_pins[] = {
 			     60, UNIPHIER_PIN_DRV_1BIT,
 			     60, UNIPHIER_PIN_PULL_DOWN),
 	UNIPHIER_PINCTRL_PIN(61, "DMDSDA0", 61,
-			     61, UNIPHIER_PIN_DRV_1BIT,
+			     -1, UNIPHIER_PIN_DRV_FIXED4,
 			     -1, UNIPHIER_PIN_PULL_NONE),
 	UNIPHIER_PINCTRL_PIN(62, "DMDSCL0", 62,
-			     62, UNIPHIER_PIN_DRV_1BIT,
+			     -1, UNIPHIER_PIN_DRV_FIXED4,
 			     -1, UNIPHIER_PIN_PULL_NONE),
 	UNIPHIER_PINCTRL_PIN(63, "SDA0", 63,
-			     63, UNIPHIER_PIN_DRV_1BIT,
+			     -1, UNIPHIER_PIN_DRV_FIXED4,
 			     -1, UNIPHIER_PIN_PULL_NONE),
 	UNIPHIER_PINCTRL_PIN(64, "SCL0", 64,
-			     64, UNIPHIER_PIN_DRV_1BIT,
+			     -1, UNIPHIER_PIN_DRV_FIXED4,
 			     -1, UNIPHIER_PIN_PULL_NONE),
 	UNIPHIER_PINCTRL_PIN(65, "SDA1", 65,
-			     65, UNIPHIER_PIN_DRV_1BIT,
+			     -1, UNIPHIER_PIN_DRV_FIXED4,
 			     -1, UNIPHIER_PIN_PULL_NONE),
 	UNIPHIER_PINCTRL_PIN(66, "SCL1", 66,
-			     66, UNIPHIER_PIN_DRV_1BIT,
+			     -1, UNIPHIER_PIN_DRV_FIXED4,
 			     -1, UNIPHIER_PIN_PULL_NONE),
 	UNIPHIER_PINCTRL_PIN(67, "HIN", 67,
 			     -1, UNIPHIER_PIN_DRV_FIXED5,
@@ -474,6 +474,9 @@ static const unsigned emmc_pins[] = {18, 19, 20, 21, 22, 23, 24, 25};
 static const int emmc_muxvals[] = {0, 0, 0, 0, 0, 0, 0, 0};
 static const unsigned emmc_dat8_pins[] = {26, 27, 28, 29};
 static const int emmc_dat8_muxvals[] = {0, 0, 0, 0};
+static const unsigned ether_rmii_pins[] = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+					   16, 17};
+static const int ether_rmii_muxvals[] = {4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4};
 static const unsigned i2c0_pins[] = {63, 64};
 static const int i2c0_muxvals[] = {0, 0};
 static const unsigned i2c1_pins[] = {65, 66};
@@ -485,8 +488,6 @@ static const int i2c4_muxvals[] = {1, 1};
 static const unsigned nand_pins[] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
 				     15, 16, 17};
 static const int nand_muxvals[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-static const unsigned sd_pins[] = {10, 11, 12, 13, 14, 15, 16, 17};
-static const int sd_muxvals[] = {3, 3, 3, 3, 3, 3, 3, 3};  /* No SDVOLC */
 static const unsigned system_bus_pins[] = {1, 2, 6, 7, 8, 9, 10, 11, 12, 13,
 					   14, 15, 16, 17};
 static const int system_bus_muxvals[] = {0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
@@ -507,8 +508,6 @@ static const unsigned usb1_pins[] = {48, 49};
 static const int usb1_muxvals[] = {0, 0};
 static const unsigned usb2_pins[] = {50, 51};
 static const int usb2_muxvals[] = {0, 0};
-static const unsigned usb3_pins[] = {52, 53};
-static const int usb3_muxvals[] = {0, 0};
 static const unsigned port_range_pins[] = {
 	159, 160, 161, 162, 163, 164, 165, 166,		/* PORT0x */
 	0, 1, 2, 3, 4, 5, 6, 7,				/* PORT1x */
@@ -593,12 +592,12 @@ static const int xirq_alternatives_muxvals[] = {
 static const struct uniphier_pinctrl_group uniphier_ld11_groups[] = {
 	UNIPHIER_PINCTRL_GROUP(emmc),
 	UNIPHIER_PINCTRL_GROUP(emmc_dat8),
+	UNIPHIER_PINCTRL_GROUP(ether_rmii),
 	UNIPHIER_PINCTRL_GROUP(i2c0),
 	UNIPHIER_PINCTRL_GROUP(i2c1),
 	UNIPHIER_PINCTRL_GROUP(i2c3),
 	UNIPHIER_PINCTRL_GROUP(i2c4),
 	UNIPHIER_PINCTRL_GROUP(nand),
-	UNIPHIER_PINCTRL_GROUP(sd),
 	UNIPHIER_PINCTRL_GROUP(system_bus),
 	UNIPHIER_PINCTRL_GROUP(system_bus_cs1),
 	UNIPHIER_PINCTRL_GROUP(uart0),
@@ -608,7 +607,6 @@ static const struct uniphier_pinctrl_group uniphier_ld11_groups[] = {
 	UNIPHIER_PINCTRL_GROUP(usb0),
 	UNIPHIER_PINCTRL_GROUP(usb1),
 	UNIPHIER_PINCTRL_GROUP(usb2),
-	UNIPHIER_PINCTRL_GROUP(usb3),
 	UNIPHIER_PINCTRL_GROUP_GPIO_RANGE_PORT(port_range),
 	UNIPHIER_PINCTRL_GROUP_GPIO_RANGE_IRQ(xirq),
 	UNIPHIER_PINCTRL_GROUP_GPIO_RANGE_IRQ(xirq_alternatives),
@@ -821,12 +819,12 @@ static const struct uniphier_pinctrl_group uniphier_ld11_groups[] = {
 };
 
 static const char * const emmc_groups[] = {"emmc", "emmc_dat8"};
+static const char * const ether_rmii_groups[] = {"ether_rmii"};
 static const char * const i2c0_groups[] = {"i2c0"};
 static const char * const i2c1_groups[] = {"i2c1"};
 static const char * const i2c3_groups[] = {"i2c3"};
 static const char * const i2c4_groups[] = {"i2c4"};
 static const char * const nand_groups[] = {"nand"};
-static const char * const sd_groups[] = {"sd"};
 static const char * const system_bus_groups[] = {"system_bus",
 						 "system_bus_cs1"};
 static const char * const uart0_groups[] = {"uart0"};
@@ -836,7 +834,6 @@ static const char * const uart3_groups[] = {"uart3"};
 static const char * const usb0_groups[] = {"usb0"};
 static const char * const usb1_groups[] = {"usb1"};
 static const char * const usb2_groups[] = {"usb2"};
-static const char * const usb3_groups[] = {"usb3"};
 static const char * const port_groups[] = {
 	"port00",  "port01",  "port02",  "port03",
 	"port04",  "port05",  "port06",  "port07",
@@ -902,12 +899,12 @@ static const char * const xirq_groups[] = {
 
 static const struct uniphier_pinmux_function uniphier_ld11_functions[] = {
 	UNIPHIER_PINMUX_FUNCTION(emmc),
+	UNIPHIER_PINMUX_FUNCTION(ether_rmii),
 	UNIPHIER_PINMUX_FUNCTION(i2c0),
 	UNIPHIER_PINMUX_FUNCTION(i2c1),
 	UNIPHIER_PINMUX_FUNCTION(i2c3),
 	UNIPHIER_PINMUX_FUNCTION(i2c4),
 	UNIPHIER_PINMUX_FUNCTION(nand),
-	UNIPHIER_PINMUX_FUNCTION(sd),
 	UNIPHIER_PINMUX_FUNCTION(system_bus),
 	UNIPHIER_PINMUX_FUNCTION(uart0),
 	UNIPHIER_PINMUX_FUNCTION(uart1),
@@ -916,7 +913,6 @@ static const struct uniphier_pinmux_function uniphier_ld11_functions[] = {
 	UNIPHIER_PINMUX_FUNCTION(usb0),
 	UNIPHIER_PINMUX_FUNCTION(usb1),
 	UNIPHIER_PINMUX_FUNCTION(usb2),
-	UNIPHIER_PINMUX_FUNCTION(usb3),
 	UNIPHIER_PINMUX_FUNCTION(port),
 	UNIPHIER_PINMUX_FUNCTION(xirq),
 };

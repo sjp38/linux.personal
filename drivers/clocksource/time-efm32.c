@@ -236,11 +236,12 @@ static int __init efm32_clockevent_init(struct device_node *np)
 	ret = setup_irq(irq, &efm32_clock_event_irq);
 	if (ret) {
 		pr_err("Failed setup irq");
-		goto err_get_irq;
+		goto err_setup_irq;
 	}
 
 	return 0;
 
+err_setup_irq:
 err_get_irq:
 
 	iounmap(base);

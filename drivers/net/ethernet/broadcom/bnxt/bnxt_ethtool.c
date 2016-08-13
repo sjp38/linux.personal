@@ -56,6 +56,8 @@ static int bnxt_get_coalesce(struct net_device *dev,
 	coal->tx_coalesce_usecs_irq = bp->tx_coal_ticks_irq;
 	coal->tx_max_coalesced_frames_irq = bp->tx_coal_bufs_irq;
 
+	coal->stats_block_coalesce_usecs = bp->stats_coal_ticks;
+
 	return 0;
 }
 
@@ -63,6 +65,7 @@ static int bnxt_set_coalesce(struct net_device *dev,
 			     struct ethtool_coalesce *coal)
 {
 	struct bnxt *bp = netdev_priv(dev);
+	bool update_stats = false;
 	int rc = 0;
 
 	bp->rx_coal_ticks = coal->rx_coalesce_usecs;
@@ -76,8 +79,26 @@ static int bnxt_set_coalesce(struct net_device *dev,
 	bp->tx_coal_ticks_irq = coal->tx_coalesce_usecs_irq;
 	bp->tx_coal_bufs_irq = coal->tx_max_coalesced_frames_irq;
 
-	if (netif_running(dev))
-		rc = bnxt_hwrm_set_coal(bp);
+	if (bp->stats_coal_ticks != coal->stats_block_coalesce_usecs) {
+		u32 stats_ticks = coal->stats_block_coalesce_usecs;
+
+		stats_ticks = clamp_t(u32, stats_ticks,
+				      BNXT_MIN_STATS_COAL_TICKS,
+				      BNXT_MAX_STATS_COAL_TICKS);
+		stats_ticks = rounddown(stats_ticks, BNXT_MIN_STATS_COAL_TICKS);
+		bp->stats_coal_ticks = stats_ticks;
+		update_stats = true;
+	}
+
+	if (netif_running(dev)) {
+		if (update_stats) {
+			rc = bnxt_close_nic(bp, true, false);
+			if (!rc)
+				rc = bnxt_open_nic(bp, true, false);
+		} else {
+			rc = bnxt_hwrm_set_coal(bp);
+		}
+	}
 
 	return rc;
 }
@@ -341,9 +362,13 @@ static void bnxt_get_channels(struct net_device *dev,
 	channel->max_other = 0;
 	if (bp->flags & BNXT_FLAG_SHARED_RINGS) {
 		channel->combined_count = bp->rx_nr_rings;
+		if (BNXT_CHIP_TYPE_NITRO_A0(bp))
+			channel->combined_count--;
 	} else {
-		channel->rx_count = bp->rx_nr_rings;
-		channel->tx_count = bp->tx_nr_rings_per_tc;
+		if (!BNXT_CHIP_TYPE_NITRO_A0(bp)) {
+			channel->rx_count = bp->rx_nr_rings;
+			channel->tx_count = bp->tx_nr_rings_per_tc;
+		}
 	}
 }
 
@@ -364,6 +389,10 @@ static int bnxt_set_channels(struct net_device *dev,
 
 	if (channel->combined_count &&
 	    (channel->rx_count || channel->tx_count))
+		return -EINVAL;
+
+	if (BNXT_CHIP_TYPE_NITRO_A0(bp) && (channel->rx_count ||
+					    channel->tx_count))
 		return -EINVAL;
 
 	if (channel->combined_count)
@@ -961,7 +990,7 @@ static int bnxt_set_pauseparam(struct net_device *dev,
 	struct bnxt_link_info *link_info = &bp->link_info;
 
 	if (!BNXT_SINGLE_PF(bp))
-		return rc;
+		return -EOPNOTSUPP;
 
 	if (epause->autoneg) {
 		if (!(link_info->autoneg & BNXT_AUTONEG_SPEED))
@@ -1059,6 +1088,8 @@ static int bnxt_firmware_reset(struct net_device *dev,
 	case BNX_DIR_TYPE_APE_FW:
 	case BNX_DIR_TYPE_APE_PATCH:
 		req.embedded_proc_type = FW_RESET_REQ_EMBEDDED_PROC_TYPE_MGMT;
+		/* Self-reset APE upon next PCIe reset: */
+		req.selfrst_status = FW_RESET_REQ_SELFRST_STATUS_SELFRSTPCIERST;
 		break;
 	case BNX_DIR_TYPE_KONG_FW:
 	case BNX_DIR_TYPE_KONG_PATCH:
@@ -1092,8 +1123,26 @@ static int bnxt_flash_firmware(struct net_device *dev,
 	case BNX_DIR_TYPE_BOOTCODE_2:
 		code_type = CODE_BOOT;
 		break;
+	case BNX_DIR_TYPE_CHIMP_PATCH:
+		code_type = CODE_CHIMP_PATCH;
+		break;
 	case BNX_DIR_TYPE_APE_FW:
 		code_type = CODE_MCTP_PASSTHRU;
+		break;
+	case BNX_DIR_TYPE_APE_PATCH:
+		code_type = CODE_APE_PATCH;
+		break;
+	case BNX_DIR_TYPE_KONG_FW:
+		code_type = CODE_KONG_FW;
+		break;
+	case BNX_DIR_TYPE_KONG_PATCH:
+		code_type = CODE_KONG_PATCH;
+		break;
+	case BNX_DIR_TYPE_BONO_FW:
+		code_type = CODE_BONO_FW;
+		break;
+	case BNX_DIR_TYPE_BONO_PATCH:
+		code_type = CODE_BONO_PATCH;
 		break;
 	default:
 		netdev_err(dev, "Unsupported directory entry type: %u\n",
@@ -1149,6 +1198,8 @@ static bool bnxt_dir_type_is_ape_bin_format(u16 dir_type)
 	case BNX_DIR_TYPE_APE_PATCH:
 	case BNX_DIR_TYPE_KONG_FW:
 	case BNX_DIR_TYPE_KONG_PATCH:
+	case BNX_DIR_TYPE_BONO_FW:
+	case BNX_DIR_TYPE_BONO_PATCH:
 		return true;
 	}
 
@@ -1186,7 +1237,8 @@ static int bnxt_flash_firmware_from_file(struct net_device *dev,
 	const struct firmware  *fw;
 	int			rc;
 
-	if (bnxt_dir_type_is_executable(dir_type) == false)
+	if (dir_type != BNX_DIR_TYPE_UPDATE &&
+	    bnxt_dir_type_is_executable(dir_type) == false)
 		return -EINVAL;
 
 	rc = request_firmware(&fw, filename, &dev->dev);
@@ -1483,7 +1535,7 @@ static int bnxt_set_eee(struct net_device *dev, struct ethtool_eee *edata)
 	int rc = 0;
 
 	if (!BNXT_SINGLE_PF(bp))
-		return 0;
+		return -EOPNOTSUPP;
 
 	if (!(bp->flags & BNXT_FLAG_EEE_CAP))
 		return -EOPNOTSUPP;

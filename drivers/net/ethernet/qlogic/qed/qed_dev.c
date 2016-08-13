@@ -509,6 +509,7 @@ int qed_resc_alloc(struct qed_dev *cdev)
 			DP_ERR(p_hwfn,
 			       "Cannot allocate 0x%x EQ elements. The maximum of a u16 chain is 0x%x\n",
 			       n_eqes, 0xFFFF);
+			rc = -EINVAL;
 			goto alloc_err;
 		}
 
@@ -888,7 +889,7 @@ static int qed_hw_init_pf(struct qed_hwfn *p_hwfn,
 
 	if (hw_mode & (1 << MODE_MF_SI)) {
 		u8 pf_id = 0;
-		u32 val;
+		u32 val = 0;
 
 		if (!qed_hw_init_first_eth(p_hwfn, p_ptt, &pf_id)) {
 			if (p_hwfn->rel_pf_id == pf_id) {
@@ -2222,6 +2223,110 @@ int qed_fw_rss_eng(struct qed_hwfn *p_hwfn,
 	return 0;
 }
 
+static int qed_set_coalesce(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt,
+			    u32 hw_addr, void *p_eth_qzone,
+			    size_t eth_qzone_size, u8 timeset)
+{
+	struct coalescing_timeset *p_coal_timeset;
+
+	if (p_hwfn->cdev->int_coalescing_mode != QED_COAL_MODE_ENABLE) {
+		DP_NOTICE(p_hwfn, "Coalescing configuration not enabled\n");
+		return -EINVAL;
+	}
+
+	p_coal_timeset = p_eth_qzone;
+	memset(p_coal_timeset, 0, eth_qzone_size);
+	SET_FIELD(p_coal_timeset->value, COALESCING_TIMESET_TIMESET, timeset);
+	SET_FIELD(p_coal_timeset->value, COALESCING_TIMESET_VALID, 1);
+	qed_memcpy_to(p_hwfn, p_ptt, hw_addr, p_eth_qzone, eth_qzone_size);
+
+	return 0;
+}
+
+int qed_set_rxq_coalesce(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt,
+			 u16 coalesce, u8 qid, u16 sb_id)
+{
+	struct ustorm_eth_queue_zone eth_qzone;
+	u8 timeset, timer_res;
+	u16 fw_qid = 0;
+	u32 address;
+	int rc;
+
+	/* Coalesce = (timeset << timer-resolution), timeset is 7bit wide */
+	if (coalesce <= 0x7F) {
+		timer_res = 0;
+	} else if (coalesce <= 0xFF) {
+		timer_res = 1;
+	} else if (coalesce <= 0x1FF) {
+		timer_res = 2;
+	} else {
+		DP_ERR(p_hwfn, "Invalid coalesce value - %d\n", coalesce);
+		return -EINVAL;
+	}
+	timeset = (u8)(coalesce >> timer_res);
+
+	rc = qed_fw_l2_queue(p_hwfn, (u16)qid, &fw_qid);
+	if (rc)
+		return rc;
+
+	rc = qed_int_set_timer_res(p_hwfn, p_ptt, timer_res, sb_id, false);
+	if (rc)
+		goto out;
+
+	address = BAR0_MAP_REG_USDM_RAM + USTORM_ETH_QUEUE_ZONE_OFFSET(fw_qid);
+
+	rc = qed_set_coalesce(p_hwfn, p_ptt, address, &eth_qzone,
+			      sizeof(struct ustorm_eth_queue_zone), timeset);
+	if (rc)
+		goto out;
+
+	p_hwfn->cdev->rx_coalesce_usecs = coalesce;
+out:
+	return rc;
+}
+
+int qed_set_txq_coalesce(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt,
+			 u16 coalesce, u8 qid, u16 sb_id)
+{
+	struct xstorm_eth_queue_zone eth_qzone;
+	u8 timeset, timer_res;
+	u16 fw_qid = 0;
+	u32 address;
+	int rc;
+
+	/* Coalesce = (timeset << timer-resolution), timeset is 7bit wide */
+	if (coalesce <= 0x7F) {
+		timer_res = 0;
+	} else if (coalesce <= 0xFF) {
+		timer_res = 1;
+	} else if (coalesce <= 0x1FF) {
+		timer_res = 2;
+	} else {
+		DP_ERR(p_hwfn, "Invalid coalesce value - %d\n", coalesce);
+		return -EINVAL;
+	}
+	timeset = (u8)(coalesce >> timer_res);
+
+	rc = qed_fw_l2_queue(p_hwfn, (u16)qid, &fw_qid);
+	if (rc)
+		return rc;
+
+	rc = qed_int_set_timer_res(p_hwfn, p_ptt, timer_res, sb_id, true);
+	if (rc)
+		goto out;
+
+	address = BAR0_MAP_REG_XSDM_RAM + XSTORM_ETH_QUEUE_ZONE_OFFSET(fw_qid);
+
+	rc = qed_set_coalesce(p_hwfn, p_ptt, address, &eth_qzone,
+			      sizeof(struct xstorm_eth_queue_zone), timeset);
+	if (rc)
+		goto out;
+
+	p_hwfn->cdev->tx_coalesce_usecs = coalesce;
+out:
+	return rc;
+}
+
 /* Calculate final WFQ values for all vports and configure them.
  * After this configuration each vport will have
  * approx min rate =  min_pf_rate * (vport_wfq / QED_WFQ_UNIT)
@@ -2435,7 +2540,7 @@ int qed_configure_vport_wfq(struct qed_dev *cdev, u16 vp_id, u32 rate)
 
 		rc = __qed_configure_vport_wfq(p_hwfn, p_ptt, vp_id, rate);
 
-		if (!rc) {
+		if (rc) {
 			qed_ptt_release(p_hwfn, p_ptt);
 			return rc;
 		}

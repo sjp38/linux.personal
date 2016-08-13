@@ -87,13 +87,13 @@ struct rvin_graph_entity {
  *
  * @vdev:		V4L2 video device associated with VIN
  * @v4l2_dev:		V4L2 device
+ * @src_pad_idx:	source pad index for media controller drivers
  * @ctrl_handler:	V4L2 control handler
  * @notifier:		V4L2 asynchronous subdevs notifier
  * @entity:		entity in the DT for subdevice
  *
  * @lock:		protects @queue
  * @queue:		vb2 buffers queue
- * @alloc_ctx:		allocation context for the vb2 @queue
  *
  * @qlock:		protects @queue_buf, @buf_list, @continuous, @sequence
  *			@state
@@ -117,13 +117,13 @@ struct rvin_dev {
 
 	struct video_device vdev;
 	struct v4l2_device v4l2_dev;
+	int src_pad_idx;
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_async_notifier notifier;
 	struct rvin_graph_entity entity;
 
 	struct mutex lock;
 	struct vb2_queue queue;
-	struct vb2_alloc_ctx *alloc_ctx;
 
 	spinlock_t qlock;
 	struct vb2_v4l2_buffer *queue_buf[HW_BUFFER_NUM];

@@ -161,9 +161,12 @@ unsigned long kvm_compute_return_epc(struct kvm_vcpu *vcpu,
 		nextpc = epc;
 		break;
 
-	case blez_op:		/* not really i_format */
-	case blezl_op:
-		/* rt field assumed to be zero */
+	case blez_op:	/* POP06 */
+#ifndef CONFIG_CPU_MIPSR6
+	case blezl_op:	/* removed in R6 */
+#endif
+		if (insn.i_format.rt != 0)
+			goto compact_branch;
 		if ((long)arch->gprs[insn.i_format.rs] <= 0)
 			epc = epc + 4 + (insn.i_format.simmediate << 2);
 		else
@@ -171,9 +174,12 @@ unsigned long kvm_compute_return_epc(struct kvm_vcpu *vcpu,
 		nextpc = epc;
 		break;
 
-	case bgtz_op:
-	case bgtzl_op:
-		/* rt field assumed to be zero */
+	case bgtz_op:	/* POP07 */
+#ifndef CONFIG_CPU_MIPSR6
+	case bgtzl_op:	/* removed in R6 */
+#endif
+		if (insn.i_format.rt != 0)
+			goto compact_branch;
 		if ((long)arch->gprs[insn.i_format.rs] > 0)
 			epc = epc + 4 + (insn.i_format.simmediate << 2);
 		else
@@ -185,6 +191,40 @@ unsigned long kvm_compute_return_epc(struct kvm_vcpu *vcpu,
 	case cop1_op:
 		kvm_err("%s: unsupported cop1_op\n", __func__);
 		break;
+
+#ifdef CONFIG_CPU_MIPSR6
+	/* R6 added the following compact branches with forbidden slots */
+	case blezl_op:	/* POP26 */
+	case bgtzl_op:	/* POP27 */
+		/* only rt == 0 isn't compact branch */
+		if (insn.i_format.rt != 0)
+			goto compact_branch;
+		break;
+	case pop10_op:
+	case pop30_op:
+		/* only rs == rt == 0 is reserved, rest are compact branches */
+		if (insn.i_format.rs != 0 || insn.i_format.rt != 0)
+			goto compact_branch;
+		break;
+	case pop66_op:
+	case pop76_op:
+		/* only rs == 0 isn't compact branch */
+		if (insn.i_format.rs != 0)
+			goto compact_branch;
+		break;
+compact_branch:
+		/*
+		 * If we've hit an exception on the forbidden slot, then
+		 * the branch must not have been taken.
+		 */
+		epc += 8;
+		nextpc = epc;
+		break;
+#else
+compact_branch:
+		/* Compact branches not supported before R6 */
+		break;
+#endif
 	}
 
 	return nextpc;
@@ -1032,14 +1072,15 @@ enum emulation_result kvm_mips_emulate_CP0(union mips_instruction inst,
 #endif
 			/* Get reg */
 			if ((rd == MIPS_CP0_COUNT) && (sel == 0)) {
-				vcpu->arch.gprs[rt] = kvm_mips_read_count(vcpu);
+				vcpu->arch.gprs[rt] =
+				    (s32)kvm_mips_read_count(vcpu);
 			} else if ((rd == MIPS_CP0_ERRCTL) && (sel == 0)) {
 				vcpu->arch.gprs[rt] = 0x0;
 #ifdef CONFIG_KVM_MIPS_DYN_TRANS
 				kvm_mips_trans_mfc0(inst, opc, vcpu);
 #endif
 			} else {
-				vcpu->arch.gprs[rt] = cop0->reg[rd][sel];
+				vcpu->arch.gprs[rt] = (s32)cop0->reg[rd][sel];
 
 #ifdef CONFIG_KVM_MIPS_DYN_TRANS
 				kvm_mips_trans_mfc0(inst, opc, vcpu);
@@ -1561,7 +1602,10 @@ enum emulation_result kvm_mips_emulate_cache(union mips_instruction inst,
 
 	base = inst.i_format.rs;
 	op_inst = inst.i_format.rt;
-	offset = inst.i_format.simmediate;
+	if (cpu_has_mips_r6)
+		offset = inst.spec3_format.simmediate;
+	else
+		offset = inst.i_format.simmediate;
 	cache = op_inst & CacheOp_Cache;
 	op = op_inst & CacheOp_Op;
 
@@ -1724,11 +1768,27 @@ enum emulation_result kvm_mips_emulate_inst(u32 cause, u32 *opc,
 		er = kvm_mips_emulate_load(inst, cause, run, vcpu);
 		break;
 
+#ifndef CONFIG_CPU_MIPSR6
 	case cache_op:
 		++vcpu->stat.cache_exits;
 		trace_kvm_exit(vcpu, KVM_TRACE_EXIT_CACHE);
 		er = kvm_mips_emulate_cache(inst, opc, cause, run, vcpu);
 		break;
+#else
+	case spec3_op:
+		switch (inst.spec3_format.func) {
+		case cache6_op:
+			++vcpu->stat.cache_exits;
+			trace_kvm_exit(vcpu, KVM_TRACE_EXIT_CACHE);
+			er = kvm_mips_emulate_cache(inst, opc, cause, run,
+						    vcpu);
+			break;
+		default:
+			goto unknown;
+		};
+		break;
+unknown:
+#endif
 
 	default:
 		kvm_err("Instruction emulation not supported (%p/%#x)\n", opc,
@@ -2298,7 +2358,9 @@ enum emulation_result kvm_mips_handle_ri(u32 cause, u32 *opc,
 	}
 
 	if (inst.r_format.opcode == spec3_op &&
-	    inst.r_format.func == rdhwr_op) {
+	    inst.r_format.func == rdhwr_op &&
+	    inst.r_format.rs == 0 &&
+	    (inst.r_format.re >> 3) == 0) {
 		int usermode = !KVM_GUEST_KERNEL_MODE(vcpu);
 		int rd = inst.r_format.rd;
 		int rt = inst.r_format.rt;
@@ -2319,7 +2381,7 @@ enum emulation_result kvm_mips_handle_ri(u32 cause, u32 *opc,
 					     current_cpu_data.icache.linesz);
 			break;
 		case MIPS_HWR_CC:		/* Read count register */
-			arch->gprs[rt] = kvm_mips_read_count(vcpu);
+			arch->gprs[rt] = (s32)kvm_mips_read_count(vcpu);
 			break;
 		case MIPS_HWR_CCRES:		/* Count register resolution */
 			switch (current_cpu_data.cputype) {

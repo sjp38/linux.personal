@@ -9,6 +9,12 @@
 
 DECLARE_PER_CPU(struct vcpu_info *, xen_vcpu);
 
+DECLARE_PER_CPU(int, xen_vcpu_id);
+static inline int xen_vcpu_nr(int cpu)
+{
+	return per_cpu(xen_vcpu_id, cpu);
+}
+
 void xen_arch_pre_suspend(void);
 void xen_arch_post_suspend(int suspend_cancelled);
 
@@ -21,7 +27,9 @@ void xen_resume_notifier_unregister(struct notifier_block *nb);
 
 bool xen_vcpu_stolen(int vcpu);
 void xen_setup_runstate_info(int cpu);
+void xen_time_setup_guest(void);
 void xen_get_runstate_snapshot(struct vcpu_runstate_info *res);
+u64 xen_steal_clock(int cpu);
 
 int xen_setup_shutdown_event(void);
 

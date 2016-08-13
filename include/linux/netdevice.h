@@ -61,6 +61,9 @@ struct wireless_dev;
 /* 802.15.4 specific */
 struct wpan_dev;
 struct mpls_dev;
+/* UDP Tunnel offloads */
+struct udp_tunnel_info;
+struct bpf_prog;
 
 void netdev_set_default_ethtool_ops(struct net_device *dev,
 				    const struct ethtool_ops *ops);
@@ -784,6 +787,7 @@ enum {
 	TC_SETUP_MQPRIO,
 	TC_SETUP_CLSU32,
 	TC_SETUP_CLSFLOWER,
+	TC_SETUP_MATCHALL,
 };
 
 struct tc_cls_u32_offload;
@@ -794,9 +798,37 @@ struct tc_to_netdev {
 		u8 tc;
 		struct tc_cls_u32_offload *cls_u32;
 		struct tc_cls_flower_offload *cls_flower;
+		struct tc_cls_matchall_offload *cls_mall;
 	};
 };
 
+/* These structures hold the attributes of xdp state that are being passed
+ * to the netdevice through the xdp op.
+ */
+enum xdp_netdev_command {
+	/* Set or clear a bpf program used in the earliest stages of packet
+	 * rx. The prog will have been loaded as BPF_PROG_TYPE_XDP. The callee
+	 * is responsible for calling bpf_prog_put on any old progs that are
+	 * stored. In case of error, the callee need not release the new prog
+	 * reference, but on success it takes ownership and must bpf_prog_put
+	 * when it is no longer used.
+	 */
+	XDP_SETUP_PROG,
+	/* Check if a bpf program is set on the device.  The callee should
+	 * return true if a program is currently attached and running.
+	 */
+	XDP_QUERY_PROG,
+};
+
+struct netdev_xdp {
+	enum xdp_netdev_command command;
+	union {
+		/* XDP_SETUP_PROG */
+		struct bpf_prog *prog;
+		/* XDP_QUERY_PROG */
+		bool prog_attached;
+	};
+};
 
 /*
  * This structure defines the management hooks for network devices.
@@ -1024,31 +1056,18 @@ struct tc_to_netdev {
  *	not implement this, it is assumed that the hw is not able to have
  *	multiple net devices on single physical port.
  *
- * void (*ndo_add_vxlan_port)(struct  net_device *dev,
- *			      sa_family_t sa_family, __be16 port);
- *	Called by vxlan to notify a driver about the UDP port and socket
- *	address family that vxlan is listening to. It is called only when
- *	a new port starts listening. The operation is protected by the
- *	vxlan_net->sock_lock.
+ * void (*ndo_udp_tunnel_add)(struct net_device *dev,
+ *			      struct udp_tunnel_info *ti);
+ *	Called by UDP tunnel to notify a driver about the UDP port and socket
+ *	address family that a UDP tunnel is listnening to. It is called only
+ *	when a new port starts listening. The operation is protected by the
+ *	RTNL.
  *
- * void (*ndo_add_geneve_port)(struct net_device *dev,
- *			       sa_family_t sa_family, __be16 port);
- *	Called by geneve to notify a driver about the UDP port and socket
- *	address family that geneve is listnening to. It is called only when
- *	a new port starts listening. The operation is protected by the
- *	geneve_net->sock_lock.
- *
- * void (*ndo_del_geneve_port)(struct net_device *dev,
- *			       sa_family_t sa_family, __be16 port);
- *	Called by geneve to notify the driver about a UDP port and socket
- *	address family that geneve is not listening to anymore. The operation
- *	is protected by the geneve_net->sock_lock.
- *
- * void (*ndo_del_vxlan_port)(struct  net_device *dev,
- *			      sa_family_t sa_family, __be16 port);
- *	Called by vxlan to notify the driver about a UDP port and socket
- *	address family that vxlan is not listening to anymore. The operation
- *	is protected by the vxlan_net->sock_lock.
+ * void (*ndo_udp_tunnel_del)(struct net_device *dev,
+ *			      struct udp_tunnel_info *ti);
+ *	Called by UDP tunnel to notify the driver about a UDP port and socket
+ *	address family that the UDP tunnel is not listening to anymore. The
+ *	operation is protected by the RTNL.
  *
  * void* (*ndo_dfwd_add_station)(struct net_device *pdev,
  *				 struct net_device *dev)
@@ -1098,6 +1117,9 @@ struct tc_to_netdev {
  *	appropriate rx headroom value allows avoiding skb head copy on
  *	forward. Setting a negative value resets the rx headroom to the
  *	default value.
+ * int (*ndo_xdp)(struct net_device *dev, struct netdev_xdp *xdp);
+ *	This function is used to set or query state related to XDP on the
+ *	netdevice. See definition of enum xdp_netdev_command for details.
  *
  */
 struct net_device_ops {
@@ -1220,8 +1242,10 @@ struct net_device_ops {
 						    netdev_features_t features);
 	int			(*ndo_set_features)(struct net_device *dev,
 						    netdev_features_t features);
-	int			(*ndo_neigh_construct)(struct neighbour *n);
-	void			(*ndo_neigh_destroy)(struct neighbour *n);
+	int			(*ndo_neigh_construct)(struct net_device *dev,
+						       struct neighbour *n);
+	void			(*ndo_neigh_destroy)(struct net_device *dev,
+						     struct neighbour *n);
 
 	int			(*ndo_fdb_add)(struct ndmsg *ndm,
 					       struct nlattr *tb[],
@@ -1257,18 +1281,10 @@ struct net_device_ops {
 							struct netdev_phys_item_id *ppid);
 	int			(*ndo_get_phys_port_name)(struct net_device *dev,
 							  char *name, size_t len);
-	void			(*ndo_add_vxlan_port)(struct  net_device *dev,
-						      sa_family_t sa_family,
-						      __be16 port);
-	void			(*ndo_del_vxlan_port)(struct  net_device *dev,
-						      sa_family_t sa_family,
-						      __be16 port);
-	void			(*ndo_add_geneve_port)(struct  net_device *dev,
-						       sa_family_t sa_family,
-						       __be16 port);
-	void			(*ndo_del_geneve_port)(struct  net_device *dev,
-						       sa_family_t sa_family,
-						       __be16 port);
+	void			(*ndo_udp_tunnel_add)(struct net_device *dev,
+						      struct udp_tunnel_info *ti);
+	void			(*ndo_udp_tunnel_del)(struct net_device *dev,
+						      struct udp_tunnel_info *ti);
 	void*			(*ndo_dfwd_add_station)(struct net_device *pdev,
 							struct net_device *dev);
 	void			(*ndo_dfwd_del_station)(struct net_device *pdev,
@@ -1288,6 +1304,8 @@ struct net_device_ops {
 						       struct sk_buff *skb);
 	void			(*ndo_set_rx_headroom)(struct net_device *dev,
 						       int needed_headroom);
+	int			(*ndo_xdp)(struct net_device *dev,
+					   struct netdev_xdp *xdp);
 };
 
 /**
@@ -2255,8 +2273,8 @@ struct netdev_lag_lower_state_info {
 #define NETDEV_BONDING_INFO	0x0019
 #define NETDEV_PRECHANGEUPPER	0x001A
 #define NETDEV_CHANGELOWERSTATE	0x001B
-#define NETDEV_OFFLOAD_PUSH_VXLAN	0x001C
-#define NETDEV_OFFLOAD_PUSH_GENEVE	0x001D
+#define NETDEV_UDP_TUNNEL_PUSH_INFO	0x001C
+#define NETDEV_CHANGE_TX_QUEUE_LEN	0x001E
 
 int register_netdevice_notifier(struct notifier_block *nb);
 int unregister_netdevice_notifier(struct notifier_block *nb);
@@ -3274,6 +3292,7 @@ int dev_get_phys_port_id(struct net_device *dev,
 int dev_get_phys_port_name(struct net_device *dev,
 			   char *name, size_t len);
 int dev_change_proto_down(struct net_device *dev, bool proto_down);
+int dev_change_xdp_fd(struct net_device *dev, int fd);
 struct sk_buff *validate_xmit_skb_list(struct sk_buff *skb, struct net_device *dev);
 struct sk_buff *dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
 				    struct netdev_queue *txq, int *ret);
@@ -3823,11 +3842,29 @@ void *netdev_lower_get_next_private_rcu(struct net_device *dev,
 
 void *netdev_lower_get_next(struct net_device *dev,
 				struct list_head **iter);
+
 #define netdev_for_each_lower_dev(dev, ldev, iter) \
 	for (iter = (dev)->adj_list.lower.next, \
 	     ldev = netdev_lower_get_next(dev, &(iter)); \
 	     ldev; \
 	     ldev = netdev_lower_get_next(dev, &(iter)))
+
+struct net_device *netdev_all_lower_get_next(struct net_device *dev,
+					     struct list_head **iter);
+struct net_device *netdev_all_lower_get_next_rcu(struct net_device *dev,
+						 struct list_head **iter);
+
+#define netdev_for_each_all_lower_dev(dev, ldev, iter) \
+	for (iter = (dev)->all_adj_list.lower.next, \
+	     ldev = netdev_all_lower_get_next(dev, &(iter)); \
+	     ldev; \
+	     ldev = netdev_all_lower_get_next(dev, &(iter)))
+
+#define netdev_for_each_all_lower_dev_rcu(dev, ldev, iter) \
+	for (iter = (dev)->all_adj_list.lower.next, \
+	     ldev = netdev_all_lower_get_next_rcu(dev, &(iter)); \
+	     ldev; \
+	     ldev = netdev_all_lower_get_next_rcu(dev, &(iter)))
 
 void *netdev_adjacent_get_private(struct list_head *adj_list);
 void *netdev_lower_get_first_private_rcu(struct net_device *dev);
@@ -3844,6 +3881,10 @@ void *netdev_lower_dev_get_private(struct net_device *dev,
 				   struct net_device *lower_dev);
 void netdev_lower_state_changed(struct net_device *lower_dev,
 				void *lower_state_info);
+int netdev_default_l2upper_neigh_construct(struct net_device *dev,
+					   struct neighbour *n);
+void netdev_default_l2upper_neigh_destroy(struct net_device *dev,
+					  struct neighbour *n);
 
 /* RSS keys are 40 or 52 bytes long */
 #define NETDEV_RSS_KEY_LEN 52

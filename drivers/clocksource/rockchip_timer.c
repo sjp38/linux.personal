@@ -129,22 +129,26 @@ static int __init rk_timer_init(struct device_node *np, u32 ctrl_reg)
 
 	pclk = of_clk_get_by_name(np, "pclk");
 	if (IS_ERR(pclk)) {
+		ret = PTR_ERR(pclk);
 		pr_err("Failed to get pclk for '%s'\n", TIMER_NAME);
 		goto out_unmap;
 	}
 
-	if (clk_prepare_enable(pclk)) {
+	ret = clk_prepare_enable(pclk);
+	if (ret) {
 		pr_err("Failed to enable pclk for '%s'\n", TIMER_NAME);
 		goto out_unmap;
 	}
 
 	timer_clk = of_clk_get_by_name(np, "timer");
 	if (IS_ERR(timer_clk)) {
+		ret = PTR_ERR(timer_clk);
 		pr_err("Failed to get timer clock for '%s'\n", TIMER_NAME);
 		goto out_timer_clk;
 	}
 
-	if (clk_prepare_enable(timer_clk)) {
+	ret = clk_prepare_enable(timer_clk);
+	if (ret) {
 		pr_err("Failed to enable timer clock\n");
 		goto out_timer_clk;
 	}
@@ -153,6 +157,7 @@ static int __init rk_timer_init(struct device_node *np, u32 ctrl_reg)
 
 	irq = irq_of_parse_and_map(np, 0);
 	if (!irq) {
+		ret = -EINVAL;
 		pr_err("Failed to map interrupts for '%s'\n", TIMER_NAME);
 		goto out_irq;
 	}

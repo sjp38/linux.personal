@@ -1165,7 +1165,7 @@ static void brcmnand_send_cmd(struct brcmnand_host *host, int cmd)
 	ctrl->cmd_pending = cmd;
 
 	intfc = brcmnand_read_reg(ctrl, BRCMNAND_INTFC_STATUS);
-	BUG_ON(!(intfc & INTFC_CTLR_READY));
+	WARN_ON(!(intfc & INTFC_CTLR_READY));
 
 	mb(); /* flush previous writes */
 	brcmnand_write_reg(ctrl, BRCMNAND_CMD_START,
@@ -1659,7 +1659,7 @@ static int brcmnand_read(struct mtd_info *mtd, struct nand_chip *chip,
 	struct brcmnand_controller *ctrl = host->ctrl;
 	u64 err_addr = 0;
 	int err;
-	static bool retry = true;
+	bool retry = true;
 
 	dev_dbg(ctrl->dev, "read %llx -> %p\n", (unsigned long long)addr, buf);
 

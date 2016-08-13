@@ -995,6 +995,11 @@ void kvm_s390_vcpu_wakeup(struct kvm_vcpu *vcpu)
 		swake_up(&vcpu->wq);
 		vcpu->stat.halt_wakeup++;
 	}
+	/*
+	 * The VCPU might not be sleeping but is executing the VSIE. Let's
+	 * kick it, so it leaves the SIE to process the request.
+	 */
+	kvm_s390_vsie_kick(vcpu);
 }
 
 enum hrtimer_restart kvm_s390_idle_wakeup(struct hrtimer *timer)
@@ -2241,7 +2246,8 @@ static int set_adapter_int(struct kvm_kernel_irq_routing_entry *e,
 	return ret;
 }
 
-int kvm_set_routing_entry(struct kvm_kernel_irq_routing_entry *e,
+int kvm_set_routing_entry(struct kvm *kvm,
+			  struct kvm_kernel_irq_routing_entry *e,
 			  const struct kvm_irq_routing_entry *ue)
 {
 	int ret;

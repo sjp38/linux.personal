@@ -104,6 +104,7 @@ static void show_cpu_summary(struct seq_file *m, void *v)
 		   "bogomips per cpu: %lu.%02lu\n",
 		   num_online_cpus(), loops_per_jiffy/(500000/HZ),
 		   (loops_per_jiffy/(5000/HZ))%100);
+	seq_printf(m, "max thread id   : %d\n", smp_cpu_mtid);
 	seq_puts(m, "features\t: ");
 	for (i = 0; i < ARRAY_SIZE(hwcap_str); i++)
 		if (hwcap_str[i] && (elf_hwcap & (1UL << i)))
@@ -143,7 +144,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		show_cpu_summary(m, v);
 	if (!machine_has_cpu_mhz)
 		return 0;
-	seq_printf(m, "\ncpu             : %ld\n", n);
+	seq_printf(m, "\ncpu number      : %ld\n", n);
 	show_cpu_mhz(m, n);
 	return 0;
 }

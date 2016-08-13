@@ -437,7 +437,24 @@ static int vrf_rt6_create(struct net_device *dev)
 	dst_hold(&rt6->dst);
 
 	rt6->rt6i_table = rt6i_table;
-	rt6->dst.output = vrf_output6;
+	rt6->dst.output	= vrf_output6;
+
+	/* create a dst for local routing - packets sent locally
+	 * to local address via the VRF device as a loopback
+	 */
+	rt6_local = ip6_dst_alloc(net, dev, flags);
+	if (!rt6_local) {
+		dst_release(&rt6->dst);
+		goto out;
+	}
+
+	dst_hold(&rt6_local->dst);
+
+	rt6_local->rt6i_idev  = in6_dev_get(dev);
+	rt6_local->rt6i_flags = RTF_UP | RTF_NONEXTHOP | RTF_LOCAL;
+	rt6_local->rt6i_table = rt6i_table;
+	rt6_local->dst.input  = ip6_input;
+
 	rcu_assign_pointer(vrf->rt6, rt6);
 	rcu_assign_pointer(vrf->rt6_local, rt6_local);
 
@@ -559,7 +576,16 @@ static int vrf_rtable_create(struct net_device *dev)
 	if (!rth)
 		return -ENOMEM;
 
-	rth->dst.output = vrf_output;
+	/* create a dst for local ingress routing - packets sent locally
+	 * to local address via the VRF device as a loopback
+	 */
+	rth_local = rt_dst_alloc(dev, RTCF_LOCAL, RTN_LOCAL, 1, 1, 0);
+	if (!rth_local) {
+		dst_release(&rth->dst);
+		return -ENOMEM;
+	}
+
+	rth->dst.output	= vrf_output;
 	rth->rt_table_id = vrf->tb_id;
 
 	rth_local->rt_table_id = vrf->tb_id;
@@ -753,6 +779,25 @@ static int vrf_get_saddr(struct net_device *dev, struct flowi4 *fl4)
 	return rc;
 }
 
+static int vrf_rcv_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
+{
+	return 0;
+}
+
+static struct sk_buff *vrf_rcv_nfhook(u8 pf, unsigned int hook,
+				      struct sk_buff *skb,
+				      struct net_device *dev)
+{
+	struct net *net = dev_net(dev);
+
+	nf_reset(skb);
+
+	if (NF_HOOK(pf, hook, net, NULL, skb, dev, NULL, vrf_rcv_finish) < 0)
+		skb = NULL;    /* kfree_skb(skb) handled by nf code */
+
+	return skb;
+}
+
 #if IS_ENABLED(CONFIG_IPV6)
 /* neighbor handling is done with actual device; do not want
  * to flip skb->dev for those ndisc packets. This really fails
@@ -873,6 +918,7 @@ static struct sk_buff *vrf_ip6_rcv(struct net_device *vrf_dev,
 	if (need_strict)
 		vrf_ip6_input_dst(skb, vrf_dev, orig_iif);
 
+	skb = vrf_rcv_nfhook(NFPROTO_IPV6, NF_INET_PRE_ROUTING, skb, vrf_dev);
 out:
 	return skb;
 }
@@ -903,6 +949,7 @@ static struct sk_buff *vrf_ip_rcv(struct net_device *vrf_dev,
 	dev_queue_xmit_nit(skb, vrf_dev);
 	skb_pull(skb, skb->mac_len);
 
+	skb = vrf_rcv_nfhook(NFPROTO_IPV4, NF_INET_PRE_ROUTING, skb, vrf_dev);
 out:
 	return skb;
 }
@@ -973,6 +1020,46 @@ static struct dst_entry *vrf_get_rt6_dst(const struct net_device *dev,
 
 	return dst;
 }
+
+/* called under rcu_read_lock */
+static int vrf_get_saddr6(struct net_device *dev, const struct sock *sk,
+			  struct flowi6 *fl6)
+{
+	struct net *net = dev_net(dev);
+	struct dst_entry *dst;
+	struct rt6_info *rt;
+	int err;
+
+	if (rt6_need_strict(&fl6->daddr)) {
+		rt = vrf_ip6_route_lookup(net, dev, fl6, fl6->flowi6_oif,
+					  RT6_LOOKUP_F_IFACE);
+		if (unlikely(!rt))
+			return 0;
+
+		dst = &rt->dst;
+	} else {
+		__u8 flags = fl6->flowi6_flags;
+
+		fl6->flowi6_flags |= FLOWI_FLAG_L3MDEV_SRC;
+		fl6->flowi6_flags |= FLOWI_FLAG_SKIP_NH_OIF;
+
+		dst = ip6_route_output(net, sk, fl6);
+		rt = (struct rt6_info *)dst;
+
+		fl6->flowi6_flags = flags;
+	}
+
+	err = dst->error;
+	if (!err) {
+		err = ip6_route_get_saddr(net, rt, &fl6->daddr,
+					  sk ? inet6_sk(sk)->srcprefs : 0,
+					  &fl6->saddr);
+	}
+
+	dst_release(dst);
+
+	return err;
+}
 #endif
 
 static const struct l3mdev_ops vrf_l3mdev_ops = {
@@ -982,6 +1069,7 @@ static const struct l3mdev_ops vrf_l3mdev_ops = {
 	.l3mdev_l3_rcv		= vrf_l3_rcv,
 #if IS_ENABLED(CONFIG_IPV6)
 	.l3mdev_get_rt6_dst	= vrf_get_rt6_dst,
+	.l3mdev_get_saddr6	= vrf_get_saddr6,
 #endif
 };
 

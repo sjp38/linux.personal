@@ -12,7 +12,6 @@
 #include <xen/page.h>
 #include <xen/interface/sched.h>
 #include <xen/xen-ops.h>
-#include <asm/paravirt.h>
 #include <asm/xen/hypervisor.h>
 #include <asm/xen/hypercall.h>
 #include <asm/xen/xen-ops.h>
@@ -50,6 +49,10 @@ struct shared_info *HYPERVISOR_shared_info = (void *)&xen_dummy_shared_info;
 DEFINE_PER_CPU(struct vcpu_info *, xen_vcpu);
 static struct vcpu_info __percpu *xen_vcpu_info;
 
+/* Linux <-> Xen vCPU id mapping */
+DEFINE_PER_CPU(int, xen_vcpu_id) = -1;
+EXPORT_PER_CPU_SYMBOL(xen_vcpu_id);
+
 /* These are unused until we support booting "pre-ballooned" */
 unsigned long xen_released_pages;
 struct xen_memory_region xen_extra_mem[XEN_EXTRA_MEM_MAX_REGIONS] __initdata;
@@ -85,19 +88,6 @@ int xen_unmap_domain_gfn_range(struct vm_area_struct *vma,
 	return xen_xlate_unmap_gfn_range(vma, nr, pages);
 }
 EXPORT_SYMBOL_GPL(xen_unmap_domain_gfn_range);
-
-static unsigned long long xen_stolen_accounting(int cpu)
-{
-	struct vcpu_runstate_info state;
-
-	BUG_ON(cpu != smp_processor_id());
-
-	xen_get_runstate_snapshot(&state);
-
-	WARN_ON(state.state != RUNSTATE_running);
-
-	return state.time[RUNSTATE_runnable] + state.time[RUNSTATE_offline];
-}
 
 static void xen_read_wallclock(struct timespec64 *ts)
 {
@@ -163,12 +153,11 @@ static struct notifier_block xen_pvclock_gtod_notifier = {
 	.notifier_call = xen_pvclock_gtod_notify,
 };
 
-static void xen_percpu_init(void)
+static int xen_starting_cpu(unsigned int cpu)
 {
 	struct vcpu_register_vcpu_info info;
 	struct vcpu_info *vcpup;
 	int err;
-	int cpu = get_cpu();
 
 	/* 
 	 * VCPUOP_register_vcpu_info cannot be called twice for the same
@@ -181,10 +170,14 @@ static void xen_percpu_init(void)
 	pr_info("Xen: initializing cpu%d\n", cpu);
 	vcpup = per_cpu_ptr(xen_vcpu_info, cpu);
 
+	/* Direct vCPU id mapping for ARM guests. */
+	per_cpu(xen_vcpu_id, cpu) = cpu;
+
 	info.mfn = virt_to_gfn(vcpup);
 	info.offset = xen_offset_in_page(vcpup);
 
-	err = HYPERVISOR_vcpu_op(VCPUOP_register_vcpu_info, cpu, &info);
+	err = HYPERVISOR_vcpu_op(VCPUOP_register_vcpu_info, xen_vcpu_nr(cpu),
+				 &info);
 	BUG_ON(err);
 	per_cpu(xen_vcpu, cpu) = vcpup;
 
@@ -192,7 +185,13 @@ static void xen_percpu_init(void)
 
 after_register_vcpu_info:
 	enable_percpu_irq(xen_events_irq, 0);
-	put_cpu();
+	return 0;
+}
+
+static int xen_dying_cpu(unsigned int cpu)
+{
+	disable_percpu_irq(xen_events_irq);
+	return 0;
 }
 
 static void xen_restart(enum reboot_mode reboot_mode, const char *cmd)
@@ -211,32 +210,50 @@ static void xen_power_off(void)
 	BUG_ON(rc);
 }
 
-static int xen_cpu_notification(struct notifier_block *self,
-				unsigned long action,
-				void *hcpu)
-{
-	switch (action) {
-	case CPU_STARTING:
-		xen_percpu_init();
-		break;
-	case CPU_DYING:
-		disable_percpu_irq(xen_events_irq);
-		break;
-	default:
-		break;
-	}
-
-	return NOTIFY_OK;
-}
-
-static struct notifier_block xen_cpu_notifier = {
-	.notifier_call = xen_cpu_notification,
-};
-
 static irqreturn_t xen_arm_callback(int irq, void *arg)
 {
 	xen_hvm_evtchn_do_upcall();
 	return IRQ_HANDLED;
+}
+
+static __initdata struct {
+	const char *compat;
+	const char *prefix;
+	const char *version;
+	bool found;
+} hyper_node = {"xen,xen", "xen,xen-", NULL, false};
+
+static int __init fdt_find_hyper_node(unsigned long node, const char *uname,
+				      int depth, void *data)
+{
+	const void *s = NULL;
+	int len;
+
+	if (depth != 1 || strcmp(uname, "hypervisor") != 0)
+		return 0;
+
+	if (of_flat_dt_is_compatible(node, hyper_node.compat))
+		hyper_node.found = true;
+
+	s = of_get_flat_dt_prop(node, "compatible", &len);
+	if (strlen(hyper_node.prefix) + 3  < len &&
+	    !strncmp(hyper_node.prefix, s, strlen(hyper_node.prefix)))
+		hyper_node.version = s + strlen(hyper_node.prefix);
+
+	/*
+	 * Check if Xen supports EFI by checking whether there is the
+	 * "/hypervisor/uefi" node in DT. If so, runtime services are available
+	 * through proxy functions (e.g. in case of Xen dom0 EFI implementation
+	 * they call special hypercall which executes relevant EFI functions)
+	 * and that is why they are always enabled.
+	 */
+	if (IS_ENABLED(CONFIG_XEN_EFI)) {
+		if ((of_get_flat_dt_subnode_by_name(node, "uefi") > 0) &&
+		    !efi_runtime_disabled())
+			set_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+	}
+
+	return 0;
 }
 
 static __initdata struct {
@@ -402,6 +419,9 @@ static int __init xen_guest_init(void)
 	if (xen_vcpu_info == NULL)
 		return -ENOMEM;
 
+	/* Direct vCPU id mapping for ARM guests. */
+	per_cpu(xen_vcpu_id, 0) = 0;
+
 	xen_auto_xlat_grant_frames.count = gnttab_max_grant_frames();
 	if (xen_xlate_map_ballooned_pages(&xen_auto_xlat_grant_frames.pfn,
 					  &xen_auto_xlat_grant_frames.vaddr,
@@ -428,16 +448,14 @@ static int __init xen_guest_init(void)
 		return -EINVAL;
 	}
 
-	xen_percpu_init();
+	xen_time_setup_guest();
 
-	register_cpu_notifier(&xen_cpu_notifier);
-
-	pv_time_ops.steal_clock = xen_stolen_accounting;
-	static_key_slow_inc(&paravirt_steal_enabled);
 	if (xen_initial_domain())
 		pvclock_gtod_register_notifier(&xen_pvclock_gtod_notifier);
 
-	return 0;
+	return cpuhp_setup_state(CPUHP_AP_ARM_XEN_STARTING,
+				 "AP_ARM_XEN_STARTING", xen_starting_cpu,
+				 xen_dying_cpu);
 }
 early_initcall(xen_guest_init);
 
@@ -480,4 +498,5 @@ EXPORT_SYMBOL_GPL(HYPERVISOR_vcpu_op);
 EXPORT_SYMBOL_GPL(HYPERVISOR_tmem_op);
 EXPORT_SYMBOL_GPL(HYPERVISOR_platform_op);
 EXPORT_SYMBOL_GPL(HYPERVISOR_multicall);
+EXPORT_SYMBOL_GPL(HYPERVISOR_vm_assist);
 EXPORT_SYMBOL_GPL(privcmd_call);

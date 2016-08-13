@@ -21,4 +21,3 @@ typedef union {
 } DWunion;
 
 #endif /* __ASM_LIBGCC_H */
-

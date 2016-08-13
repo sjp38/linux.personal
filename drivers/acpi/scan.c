@@ -501,6 +501,8 @@ static void acpi_device_del(struct acpi_device *device)
 	device_del(&device->dev);
 }
 
+static BLOCKING_NOTIFIER_HEAD(acpi_reconfig_chain);
+
 static LIST_HEAD(acpi_device_del_list);
 static DEFINE_MUTEX(acpi_device_del_lock);
 
@@ -520,6 +522,9 @@ static void acpi_device_del_work_fn(struct work_struct *work_not_used)
 		list_del(&adev->del_list);
 
 		mutex_unlock(&acpi_device_del_lock);
+
+		blocking_notifier_call_chain(&acpi_reconfig_chain,
+					     ACPI_RECONFIG_DEVICE_REMOVE, adev);
 
 		acpi_device_del(adev);
 		/*
@@ -1413,7 +1418,7 @@ void acpi_init_device_object(struct acpi_device *device, acpi_handle handle,
 	acpi_bus_get_flags(device);
 	device->flags.match_driver = false;
 	device->flags.initialized = true;
-	device->flags.visited = false;
+	acpi_device_clear_enumerated(device);
 	device_initialize(&device->dev);
 	dev_set_uevent_suppress(&device->dev, true);
 	acpi_init_coherency(device);
@@ -1721,15 +1726,20 @@ static void acpi_default_enumeration(struct acpi_device *device)
 	bool is_spi_i2c_slave = false;
 
 	/*
-	 * Do not enemerate SPI/I2C slaves as they will be enuerated by their
+	 * Do not enumerate SPI/I2C slaves as they will be enumerated by their
 	 * respective parents.
 	 */
 	INIT_LIST_HEAD(&resource_list);
 	acpi_dev_get_resources(device, &resource_list, acpi_check_spi_i2c_slave,
 			       &is_spi_i2c_slave);
 	acpi_dev_free_resource_list(&resource_list);
-	if (!is_spi_i2c_slave)
+	if (!is_spi_i2c_slave) {
 		acpi_create_platform_device(device);
+		acpi_device_set_enumerated(device);
+	} else {
+		blocking_notifier_call_chain(&acpi_reconfig_chain,
+					     ACPI_RECONFIG_DEVICE_ADD, device);
+	}
 }
 
 static const struct acpi_device_id generic_device_ids[] = {
@@ -1796,7 +1806,7 @@ static void acpi_bus_attach(struct acpi_device *device)
 	acpi_bus_get_status(device);
 	/* Skip devices that are not present. */
 	if (!acpi_device_is_present(device)) {
-		device->flags.visited = false;
+		acpi_device_clear_enumerated(device);
 		device->flags.power_manageable = 0;
 		return;
 	}
@@ -1811,7 +1821,7 @@ static void acpi_bus_attach(struct acpi_device *device)
 
 		device->flags.initialized = true;
 	}
-	device->flags.visited = false;
+
 	ret = acpi_scan_attach_handler(device);
 	if (ret < 0)
 		return;
@@ -1825,7 +1835,6 @@ static void acpi_bus_attach(struct acpi_device *device)
 		if (!ret && device->pnp.type.platform_id)
 			acpi_default_enumeration(device);
 	}
-	device->flags.visited = true;
 
  ok:
 	list_for_each_entry(child, &device->children, node)
@@ -1917,7 +1926,7 @@ void acpi_bus_trim(struct acpi_device *adev)
 	 */
 	acpi_device_set_power(adev, ACPI_STATE_D3_COLD);
 	adev->flags.initialized = false;
-	adev->flags.visited = false;
+	acpi_device_clear_enumerated(adev);
 }
 EXPORT_SYMBOL_GPL(acpi_bus_trim);
 
@@ -1973,6 +1982,8 @@ static void __init acpi_get_spcr_uart_addr(void)
 	else
 		printk(KERN_WARNING PREFIX "STAO table present, but SPCR is missing\n");
 }
+
+static bool acpi_scan_initialized;
 
 int __init acpi_scan_init(void)
 {
@@ -2034,6 +2045,8 @@ int __init acpi_scan_init(void)
 
 	acpi_update_all_gpes();
 
+	acpi_scan_initialized = true;
+
  out:
 	mutex_unlock(&acpi_scan_lock);
 	return result;
@@ -2077,3 +2090,57 @@ int __init __acpi_probe_device_table(struct acpi_probe_entry *ap_head, int nr)
 
 	return count;
 }
+
+struct acpi_table_events_work {
+	struct work_struct work;
+	void *table;
+	u32 event;
+};
+
+static void acpi_table_events_fn(struct work_struct *work)
+{
+	struct acpi_table_events_work *tew;
+
+	tew = container_of(work, struct acpi_table_events_work, work);
+
+	if (tew->event == ACPI_TABLE_EVENT_LOAD) {
+		acpi_scan_lock_acquire();
+		acpi_bus_scan(ACPI_ROOT_OBJECT);
+		acpi_scan_lock_release();
+	}
+
+	kfree(tew);
+}
+
+void acpi_scan_table_handler(u32 event, void *table, void *context)
+{
+	struct acpi_table_events_work *tew;
+
+	if (!acpi_scan_initialized)
+		return;
+
+	if (event != ACPI_TABLE_EVENT_LOAD)
+		return;
+
+	tew = kmalloc(sizeof(*tew), GFP_KERNEL);
+	if (!tew)
+		return;
+
+	INIT_WORK(&tew->work, acpi_table_events_fn);
+	tew->table = table;
+	tew->event = event;
+
+	schedule_work(&tew->work);
+}
+
+int acpi_reconfig_notifier_register(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&acpi_reconfig_chain, nb);
+}
+EXPORT_SYMBOL(acpi_reconfig_notifier_register);
+
+int acpi_reconfig_notifier_unregister(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&acpi_reconfig_chain, nb);
+}
+EXPORT_SYMBOL(acpi_reconfig_notifier_unregister);

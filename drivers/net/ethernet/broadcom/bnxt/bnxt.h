@@ -11,10 +11,10 @@
 #define BNXT_H
 
 #define DRV_MODULE_NAME		"bnxt_en"
-#define DRV_MODULE_VERSION	"1.2.0"
+#define DRV_MODULE_VERSION	"1.3.0"
 
 #define DRV_VER_MAJ	1
-#define DRV_VER_MIN	0
+#define DRV_VER_MIN	3
 #define DRV_VER_UPD	0
 
 struct tx_bd {
@@ -359,7 +359,8 @@ struct rx_tpa_end_cmp {
 	 RX_TPA_END_CMP_FLAGS_PLACEMENT_ANY_GRO)
 
 #define TPA_END_GRO_TS(rx_tpa_end)					\
-	((rx_tpa_end)->rx_tpa_end_cmp_tsdelta & cpu_to_le32(RX_TPA_END_GRO_TS))
+	(!!((rx_tpa_end)->rx_tpa_end_cmp_tsdelta &			\
+	    cpu_to_le32(RX_TPA_END_GRO_TS)))
 
 struct rx_tpa_end_cmp_ext {
 	__le32 rx_tpa_end_cmp_dup_acks;
@@ -694,7 +695,8 @@ struct bnxt_ring_grp_info {
 
 struct bnxt_vnic_info {
 	u16		fw_vnic_id; /* returned by Chimp during alloc */
-	u16		fw_rss_cos_lb_ctx;
+#define BNXT_MAX_CTX_PER_VNIC	2
+	u16		fw_rss_cos_lb_ctx[BNXT_MAX_CTX_PER_VNIC];
 	u16		fw_l2_ctx_id;
 #define BNXT_MAX_UC_ADDRS	4
 	__le64		fw_l2_filter_id[BNXT_MAX_UC_ADDRS];
@@ -753,8 +755,8 @@ struct bnxt_vf_info {
 struct bnxt_pf_info {
 #define BNXT_FIRST_PF_FID	1
 #define BNXT_FIRST_VF_FID	128
-	u32	fw_fid;
-	u8	port_id;
+	u16	fw_fid;
+	u16	port_id;
 	u8	mac_addr[ETH_ALEN];
 	u16	max_rsscos_ctxs;
 	u16	max_cp_rings;
@@ -783,10 +785,12 @@ struct bnxt_pf_info {
 
 struct bnxt_ntuple_filter {
 	struct hlist_node	hash;
+	u8			dst_mac_addr[ETH_ALEN];
 	u8			src_mac_addr[ETH_ALEN];
 	struct flow_keys	fkeys;
 	__le64			filter_id;
 	u16			sw_id;
+	u8			l2_fltr_idx;
 	u16			rxq;
 	u32			flow_id;
 	unsigned long		state;
@@ -892,6 +896,7 @@ struct bnxt {
 #define CHIP_NUM_57301		0x16c8
 #define CHIP_NUM_57302		0x16c9
 #define CHIP_NUM_57304		0x16ca
+#define CHIP_NUM_58700		0x16cd
 #define CHIP_NUM_57402		0x16d0
 #define CHIP_NUM_57404		0x16d1
 #define CHIP_NUM_57406		0x16d2
@@ -953,6 +958,7 @@ struct bnxt {
 	#define BNXT_FLAG_SHARED_RINGS	0x200
 	#define BNXT_FLAG_PORT_STATS	0x400
 	#define BNXT_FLAG_EEE_CAP	0x1000
+	#define BNXT_FLAG_CHIP_NITRO_A0	0x1000000
 
 	#define BNXT_FLAG_ALL_CONFIG_FEATS (BNXT_FLAG_TPA |		\
 					    BNXT_FLAG_RFS |		\
@@ -962,6 +968,7 @@ struct bnxt {
 #define BNXT_VF(bp)		((bp)->flags & BNXT_FLAG_VF)
 #define BNXT_NPAR(bp)		((bp)->port_partition_type)
 #define BNXT_SINGLE_PF(bp)	(BNXT_PF(bp) && !BNXT_NPAR(bp))
+#define BNXT_CHIP_TYPE_NITRO_A0(bp) ((bp)->flags & BNXT_FLAG_CHIP_NITRO_A0)
 
 	struct bnxt_napi	**bnapi;
 
@@ -1017,6 +1024,7 @@ struct bnxt {
 	unsigned long		state;
 #define BNXT_STATE_OPEN		0
 #define BNXT_STATE_IN_SP_TASK	1
+#define BNXT_STATE_FN_RST_DONE	2
 
 	struct bnxt_irq	*irq_tbl;
 	u8			mac_addr[ETH_ALEN];
@@ -1049,6 +1057,7 @@ struct bnxt {
 	__be16			vxlan_port;
 	u8			vxlan_port_cnt;
 	__le16			vxlan_fw_dst_port_id;
+	__be16			nge_port;
 	u8			nge_port_cnt;
 	__le16			nge_fw_dst_port_id;
 	u8			port_partition_type;
@@ -1064,6 +1073,11 @@ struct bnxt {
 
 #define BNXT_USEC_TO_COAL_TIMER(x)	((x) * 25 / 2)
 
+	u32			stats_coal_ticks;
+#define BNXT_DEF_STATS_COAL_TICKS	 1000000
+#define BNXT_MIN_STATS_COAL_TICKS	  250000
+#define BNXT_MAX_STATS_COAL_TICKS	 1000000
+
 	struct work_struct	sp_task;
 	unsigned long		sp_event;
 #define BNXT_RX_MASK_SP_EVENT		0
@@ -1078,6 +1092,8 @@ struct bnxt {
 #define BNXT_PERIODIC_STATS_SP_EVENT	9
 #define BNXT_HWRM_PORT_MODULE_SP_EVENT	10
 #define BNXT_RESET_TASK_SILENT_SP_EVENT	11
+#define BNXT_GENEVE_ADD_PORT_SP_EVENT	12
+#define BNXT_GENEVE_DEL_PORT_SP_EVENT	13
 
 	struct bnxt_pf_info	pf;
 #ifdef CONFIG_BNXT_SRIOV

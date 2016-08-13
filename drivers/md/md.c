@@ -285,7 +285,7 @@ static blk_qc_t md_make_request(struct request_queue *q, struct bio *bio)
 	 */
 	sectors = bio_sectors(bio);
 	/* bio could be mergeable after passing to underlayer */
-	bio->bi_rw &= ~REQ_NOMERGE;
+	bio->bi_opf &= ~REQ_NOMERGE;
 	mddev->pers->make_request(mddev, bio);
 
 	cpu = part_stat_lock();
@@ -414,7 +414,7 @@ static void md_submit_flush_data(struct work_struct *ws)
 		/* an empty barrier - all done */
 		bio_endio(bio);
 	else {
-		bio->bi_rw &= ~REQ_PREFLUSH;
+		bio->bi_opf &= ~REQ_PREFLUSH;
 		mddev->pers->make_request(mddev, bio);
 	}
 
@@ -2599,8 +2599,10 @@ state_store(struct md_rdev *rdev, const char *buf, size_t len)
 		else
 			err = -EBUSY;
 	} else if (cmd_match(buf, "remove")) {
-		clear_bit(Blocked, &rdev->flags);
-		remove_and_add_spares(rdev->mddev, rdev);
+		if (rdev->mddev->pers) {
+			clear_bit(Blocked, &rdev->flags);
+			remove_and_add_spares(rdev->mddev, rdev);
+		}
 		if (rdev->raid_disk >= 0)
 			err = -EBUSY;
 		else {
@@ -3177,8 +3179,7 @@ int md_rdev_init(struct md_rdev *rdev)
 	rdev->data_offset = 0;
 	rdev->new_data_offset = 0;
 	rdev->sb_events = 0;
-	rdev->last_read_error.tv_sec  = 0;
-	rdev->last_read_error.tv_nsec = 0;
+	rdev->last_read_error = 0;
 	rdev->sb_loaded = 0;
 	rdev->bb_page = NULL;
 	atomic_set(&rdev->nr_pending, 0);
@@ -3584,6 +3585,8 @@ level_store(struct mddev *mddev, const char *buf, size_t len)
 			mddev->to_remove = &md_redundancy_group;
 	}
 
+	module_put(oldpers->owner);
+
 	rdev_for_each(rdev, mddev) {
 		if (rdev->raid_disk < 0)
 			continue;
@@ -3941,6 +3944,8 @@ array_state_store(struct mddev *mddev, const char *buf, size_t len)
 			} else
 				err = -EBUSY;
 		}
+		if (!err)
+			sysfs_notify_dirent_safe(mddev->sysfs_state);
 		spin_unlock(&mddev->lock);
 		return err ?: len;
 	}

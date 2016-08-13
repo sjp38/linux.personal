@@ -35,6 +35,7 @@ struct cs53l30_private {
 	struct regulator_bulk_data	supplies[CS53L30_NUM_SUPPLIES];
 	struct regmap			*regmap;
 	struct gpio_desc		*reset_gpio;
+	struct gpio_desc		*mute_gpio;
 	struct clk			*mclk;
 	bool				use_sdout2;
 	u32				mclk_rate;
@@ -180,7 +181,7 @@ static const char * const input1_sel_text[] = {
 	"DMIC1 Off ADC1 Off",
 };
 
-unsigned int const input1_sel_values[] = {
+static unsigned int const input1_sel_values[] = {
 	CS53L30_CH_TYPE,
 	CS53L30_ADCxB_PDN | CS53L30_CH_TYPE,
 	CS53L30_ADCxA_PDN | CS53L30_CH_TYPE,
@@ -200,7 +201,7 @@ static const char * const input2_sel_text[] = {
 	"DMIC2 Off ADC2 Off",
 };
 
-unsigned int const input2_sel_values[] = {
+static unsigned int const input2_sel_values[] = {
 	0x0,
 	CS53L30_ADCxB_PDN,
 	CS53L30_ADCxA_PDN,
@@ -591,8 +592,12 @@ static int cs53l30_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		aspctl1 |= CS53L30_ASP_TDM_PDN;
 		break;
 	case SND_SOC_DAIFMT_DSP_A:
-		/* Clear TDM_PDN and SHIFT_LEFT, invert SCLK */
-		aspcfg |= CS53L30_ASP_SCLK_INV;
+		/*
+		 * Clear TDM_PDN to turn on TDM mode; Use ASP_SCLK_INV = 0
+		 * with SHIFT_LEFT = 1 combination as Figure 4-13 shows in
+		 * the CS53L30 datasheet
+		 */
+		aspctl1 |= CS53L30_SHIFT_LEFT;
 		break;
 	default:
 		return -EINVAL;
@@ -738,7 +743,7 @@ static int cs53l30_set_tristate(struct snd_soc_dai *dai, int tristate)
 				  CS53L30_ASP_3ST_MASK, val);
 }
 
-unsigned int const cs53l30_src_rates[] = {
+static unsigned int const cs53l30_src_rates[] = {
 	8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000
 };
 
@@ -808,8 +813,8 @@ static int cs53l30_set_dai_tdm_slot(struct snd_soc_dai *dai,
 		return -EINVAL;
 	}
 
-	/* Validate the last CS53L30 slot */
-	slot_next = loc[CS53L30_TDM_SLOT_MAX - 1] + slot_step - 1;
+	/* Validate the last active CS53L30 slot */
+	slot_next = loc[i - 1] + slot_step - 1;
 	if (slot_next > 47) {
 		dev_err(dai->dev, "slot selection out of bounds: %u\n",
 			slot_next);
@@ -833,6 +838,16 @@ static int cs53l30_set_dai_tdm_slot(struct snd_soc_dai *dai,
 	return 0;
 }
 
+static int cs53l30_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
+{
+	struct cs53l30_private *priv = snd_soc_codec_get_drvdata(dai->codec);
+
+	if (priv->mute_gpio)
+		gpiod_set_value_cansleep(priv->mute_gpio, mute);
+
+	return 0;
+}
+
 /* SNDRV_PCM_RATE_KNOT -> 12000, 24000 Hz, limit with constraint list */
 #define CS53L30_RATES (SNDRV_PCM_RATE_8000_48000 | SNDRV_PCM_RATE_KNOT)
 
@@ -846,6 +861,7 @@ static const struct snd_soc_dai_ops cs53l30_ops = {
 	.set_sysclk = cs53l30_set_sysclk,
 	.set_tristate = cs53l30_set_tristate,
 	.set_tdm_slot = cs53l30_set_dai_tdm_slot,
+	.mute_stream = cs53l30_mute_stream,
 };
 
 static struct snd_soc_dai_driver cs53l30_dai = {
@@ -879,6 +895,7 @@ static int cs53l30_codec_probe(struct snd_soc_codec *codec)
 static struct snd_soc_codec_driver cs53l30_driver = {
 	.probe = cs53l30_codec_probe,
 	.set_bias_level = cs53l30_set_bias_level,
+	.idle_bias_off = true,
 
 	.dapm_widgets = cs53l30_dapm_widgets,
 	.num_dapm_widgets = ARRAY_SIZE(cs53l30_dapm_widgets),
@@ -988,6 +1005,24 @@ static int cs53l30_i2c_probe(struct i2c_client *client,
 		}
 		/* Otherwise mark the mclk pointer to NULL */
 		cs53l30->mclk = NULL;
+	}
+
+	/* Fetch the MUTE control */
+	cs53l30->mute_gpio = devm_gpiod_get_optional(dev, "mute",
+						     GPIOD_OUT_HIGH);
+	if (IS_ERR(cs53l30->mute_gpio)) {
+		ret = PTR_ERR(cs53l30->mute_gpio);
+		goto error;
+	}
+
+	if (cs53l30->mute_gpio) {
+		/* Enable MUTE controls via MUTE pin */
+		regmap_write(cs53l30->regmap, CS53L30_MUTEP_CTL1,
+			     CS53L30_MUTEP_CTL1_MUTEALL);
+		/* Flip the polarity of MUTE pin */
+		if (gpiod_is_active_low(cs53l30->mute_gpio))
+			regmap_update_bits(cs53l30->regmap, CS53L30_MUTEP_CTL2,
+					   CS53L30_MUTE_PIN_POLARITY, 0);
 	}
 
 	if (!of_property_read_u8(np, "cirrus,micbias-lvl", &val))
