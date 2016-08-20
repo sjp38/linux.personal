@@ -530,7 +530,9 @@ int power_actor_set_power(struct thermal_cooling_device *cdev,
 		return ret;
 
 	instance->target = state;
+	mutex_lock(&cdev->lock);
 	cdev->updated = false;
+	mutex_unlock(&cdev->lock);
 	thermal_cdev_update(cdev);
 
 	return 0;
@@ -1068,10 +1070,72 @@ static void bind_tz(struct thermal_zone_device *tz)
 	struct thermal_cooling_device *pos = NULL;
 	const struct thermal_zone_params *tzp = tz->tzp;
 
-	if (!tzp && !tz->ops->bind)
+	mutex_lock(&cdev->lock);
+	/* cooling device is updated*/
+	if (cdev->updated) {
+		mutex_unlock(&cdev->lock);
 		return;
+	}
 
-	mutex_lock(&thermal_list_lock);
+	/* Make sure cdev enters the deepest cooling state */
+	list_for_each_entry(instance, &cdev->thermal_instances, cdev_node) {
+		dev_dbg(&cdev->device, "zone%d->target=%lu\n",
+				instance->tz->id, instance->target);
+		if (instance->target == THERMAL_NO_TARGET)
+			continue;
+		if (instance->target > target)
+			target = instance->target;
+	}
+	cdev->ops->set_cur_state(cdev, target);
+	cdev->updated = true;
+	mutex_unlock(&cdev->lock);
+	trace_cdev_update(cdev, target);
+	dev_dbg(&cdev->device, "set to state %lu\n", target);
+}
+EXPORT_SYMBOL(thermal_cdev_update);
+
+/**
+ * thermal_notify_framework - Sensor drivers use this API to notify framework
+ * @tz:		thermal zone device
+ * @trip:	indicates which trip point has been crossed
+ *
+ * This function handles the trip events from sensor drivers. It starts
+ * throttling the cooling devices according to the policy configured.
+ * For CRITICAL and HOT trip points, this notifies the respective drivers,
+ * and does actual throttling for other trip points i.e ACTIVE and PASSIVE.
+ * The throttling policy is based on the configured platform data; if no
+ * platform data is provided, this uses the step_wise throttling policy.
+ */
+void thermal_notify_framework(struct thermal_zone_device *tz, int trip)
+{
+	handle_thermal_trip(tz, trip);
+}
+EXPORT_SYMBOL_GPL(thermal_notify_framework);
+
+/**
+ * create_trip_attrs() - create attributes for trip points
+ * @tz:		the thermal zone device
+ * @mask:	Writeable trip point bitmap.
+ *
+ * helper function to instantiate sysfs entries for every trip
+ * point and its properties of a struct thermal_zone_device.
+ *
+ * Return: 0 on success, the proper error value otherwise.
+ */
+static int create_trip_attrs(struct thermal_zone_device *tz, int mask)
+{
+	int indx;
+	int size = sizeof(struct thermal_attr) * tz->trips;
+
+	tz->trip_type_attrs = kzalloc(size, GFP_KERNEL);
+	if (!tz->trip_type_attrs)
+		return -ENOMEM;
+
+	tz->trip_temp_attrs = kzalloc(size, GFP_KERNEL);
+	if (!tz->trip_temp_attrs) {
+		kfree(tz->trip_type_attrs);
+		return -ENOMEM;
+	}
 
 	/* If there is ops->bind, try to use ops->bind */
 	if (tz->ops->bind) {
