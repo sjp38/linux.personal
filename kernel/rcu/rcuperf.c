@@ -87,7 +87,6 @@ static unsigned long b_rcu_perf_writer_started;
 static unsigned long b_rcu_perf_writer_finished;
 
 static int rcu_perf_writer_state;
-#define RTWS_INIT		0
 #define RTWS_EXP_SYNC		1
 #define RTWS_SYNC		2
 #define RTWS_IDLE		2
