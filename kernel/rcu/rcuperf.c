@@ -52,7 +52,7 @@ MODULE_AUTHOR("Paul E. McKenney <paulmck@linux.vnet.ibm.com>");
 
 #define PERF_FLAG "-perf:"
 #define PERFOUT_STRING(s) \
-	pr_alert("%s" PERF_FLAG " %s \n", perf_type, s)
+	pr_alert("%s" PERF_FLAG " %s\n", perf_type, s)
 #define VERBOSE_PERFOUT_STRING(s) \
 	do { if (verbose) pr_alert("%s" PERF_FLAG " %s\n", perf_type, s); } while (0)
 #define VERBOSE_PERFOUT_ERRSTRING(s) \
