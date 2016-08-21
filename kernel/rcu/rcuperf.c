@@ -86,12 +86,6 @@ static u64 t_rcu_perf_writer_finished;
 static unsigned long b_rcu_perf_writer_started;
 static unsigned long b_rcu_perf_writer_finished;
 
-static int rcu_perf_writer_state;
-#define RTWS_EXP_SYNC		1
-#define RTWS_SYNC		2
-#define RTWS_IDLE		2
-#define RTWS_STOPPING		3
-
 #define MAX_MEAS 10000
 #define MIN_MEAS 100
 
@@ -380,14 +374,10 @@ rcu_perf_writer(void *arg)
 	do {
 		wdp = &wdpp[i];
 		*wdp = ktime_get_mono_fast_ns();
-		if (gp_exp) {
-			rcu_perf_writer_state = RTWS_EXP_SYNC;
+		if (gp_exp)
 			cur_ops->exp_sync();
-		} else {
-			rcu_perf_writer_state = RTWS_SYNC;
+		else
 			cur_ops->sync();
-		}
-		rcu_perf_writer_state = RTWS_IDLE;
 		t = ktime_get_mono_fast_ns();
 		*wdp = t - *wdp;
 		i_max = i;
@@ -428,7 +418,6 @@ rcu_perf_writer(void *arg)
 			i++;
 		rcu_perf_wait_shutdown();
 	} while (!torture_must_stop());
-	rcu_perf_writer_state = RTWS_STOPPING;
 	writer_n_durations[me] = i_max;
 	torture_kthread_stopping("rcu_perf_writer");
 	return 0;
