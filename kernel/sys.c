@@ -2368,6 +2368,12 @@ SYSCALL_DEFINE1(sysinfo, struct sysinfo __user *, info)
 	return 0;
 }
 
+SYSCALL_DEFINE1(sjpark, unsigned long, arg)
+{
+	printk("sys_sjpark called with %lu\n", arg);
+	return 0;
+}
+
 #ifdef CONFIG_COMPAT
 struct compat_sysinfo {
 	s32 uptime;

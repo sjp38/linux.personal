@@ -21,6 +21,7 @@ TARGETS += ptrace
 TARGETS += seccomp
 TARGETS += sigaltstack
 TARGETS += size
+TARGETS += sjpark
 TARGETS += static_keys
 TARGETS += sysctl
 ifneq (1, $(quicktest))
