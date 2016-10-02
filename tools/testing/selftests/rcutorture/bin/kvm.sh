@@ -325,7 +325,7 @@ awk < $T/cfgcpu.pack \
 function dump(first, pastlast, batchnum)
 {
 	print "echo ----Start batch " batchnum ": `date`";
-	print "echo ----Start batch " batchnum ": `date` >> " rd "/log";
+	print "echo ----Start batch " batchnum ": `date` >> " rd "log";
 	jn=1
 	for (j = first; j < pastlast; j++) {
 		builddir=KVM "/b" jn
@@ -342,20 +342,20 @@ function dump(first, pastlast, batchnum)
 		else
 			ovf = "";
 		print "echo ", cfr[jn], cpusr[jn] ovf ": Starting build. `date`";
-		print "echo ", cfr[jn], cpusr[jn] ovf ": Starting build. `date` >> " rd "/log";
+		print "echo ", cfr[jn], cpusr[jn] ovf ": Starting build. `date` >> " rd "log";
 		print "rm -f " builddir ".*";
 		print "touch " builddir ".wait";
 		print "mkdir " builddir " > /dev/null 2>&1 || :";
 		print "mkdir " rd cfr[jn] " || :";
 		print "kvm-test-1-run.sh " CONFIGDIR cf[j], builddir, rd cfr[jn], dur " \"" TORTURE_QEMU_ARG "\" \"" TORTURE_BOOTARGS "\" > " rd cfr[jn]  "/kvm-test-1-run.sh.out 2>&1 &"
 		print "echo ", cfr[jn], cpusr[jn] ovf ": Waiting for build to complete. `date`";
-		print "echo ", cfr[jn], cpusr[jn] ovf ": Waiting for build to complete. `date` >> " rd "/log";
+		print "echo ", cfr[jn], cpusr[jn] ovf ": Waiting for build to complete. `date` >> " rd "log";
 		print "while test -f " builddir ".wait"
 		print "do"
 		print "\tsleep 1"
 		print "done"
 		print "echo ", cfr[jn], cpusr[jn] ovf ": Build complete. `date`";
-		print "echo ", cfr[jn], cpusr[jn] ovf ": Build complete. `date` >> " rd "/log";
+		print "echo ", cfr[jn], cpusr[jn] ovf ": Build complete. `date` >> " rd "log";
 		jn++;
 	}
 	for (j = 1; j < jn; j++) {
@@ -364,7 +364,7 @@ function dump(first, pastlast, batchnum)
 		print "if test -z \"$TORTURE_BUILDONLY\""
 		print "then"
 		print "\techo ----", cfr[j], cpusr[j] ovf ": Starting kernel. `date`";
-		print "\techo ----", cfr[j], cpusr[j] ovf ": Starting kernel. `date` >> " rd "/log";
+		print "\techo ----", cfr[j], cpusr[j] ovf ": Starting kernel. `date` >> " rd "log";
 		print "fi"
 	}
 	njitter = 0;
@@ -381,14 +381,14 @@ function dump(first, pastlast, batchnum)
 	print "if test -z \"$TORTURE_BUILDONLY\""
 	print "then"
 	print "\techo ---- All kernel runs complete. `date`";
-	print "\techo ---- All kernel runs complete. `date` >> " rd "/log";
+	print "\techo ---- All kernel runs complete. `date` >> " rd "log";
 	print "fi"
 	for (j = 1; j < jn; j++) {
 		builddir=KVM "/b" j
 		print "echo ----", cfr[j], cpusr[j] ovf ": Build/run results:";
-		print "echo ----", cfr[j], cpusr[j] ovf ": Build/run results: >> " rd "/log";
+		print "echo ----", cfr[j], cpusr[j] ovf ": Build/run results: >> " rd "log";
 		print "cat " rd cfr[j]  "/kvm-test-1-run.sh.out";
-		print "cat " rd cfr[j]  "/kvm-test-1-run.sh.out >> " rd "/log";
+		print "cat " rd cfr[j]  "/kvm-test-1-run.sh.out >> " rd "log";
 	}
 }
 
