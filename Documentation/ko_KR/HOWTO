@@ -9,14 +9,17 @@ read for non English (read: korean) speakers and is not intended as
 a fork. So if you have any comments or updates for this file please
 try to update the original English file first.
 
-==================================
+----------------------------------
+
 이 문서는
 Documentation/HOWTO
 의 한글 번역입니다.
 
 역자： 김민찬 <minchan@kernel.org>
 감수： 이제이미 <jamee.lee@samsung.com>
-==================================
+
+----------------------------------
+
 
 어떻게 리눅스 커널 개발을 하는가
 ================================
