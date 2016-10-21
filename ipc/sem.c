@@ -287,10 +287,24 @@ static void complexmode_enter(struct sem_array *sma)
 	 */
 	smp_mb();
 
+	/* We need a full barrier after seting complex_mode:
+	 * The write to complex_mode must be visible
+	 * before we read the first sem->lock spinlock state.
+	 */
+	smp_store_mb(sma->complex_mode, true);
+
 	for (i = 0; i < sma->sem_nsems; i++) {
 		sem = sma->sem_base + i;
 		spin_unlock_wait(&sem->lock);
 	}
+	/*
+	 * spin_unlock_wait() is not a memory barriers, it is only a
+	 * control barrier. The code must pair with spin_unlock(&sem->lock),
+	 * thus just the control barrier is insufficient.
+	 *
+	 * smp_rmb() is sufficient, as writes cannot pass the control barrier.
+	 */
+	smp_rmb();
 }
 
 /*
@@ -311,11 +325,10 @@ static void complexmode_tryleave(struct sem_array *sma)
 	 * performed by the current operation must be visible
 	 * before we set complex_mode to false.
 	 */
-	smp_wmb();
-
-	WRITE_ONCE(sma->complex_mode, false);
+	smp_store_release(&sma->complex_mode, false);
 }
 
+#define SEM_GLOBAL_LOCK	(-1)
 /*
  * If the request contains only one semaphore operation, and there are
  * no complex transactions pending, lock only the semaphore involved.
@@ -334,7 +347,7 @@ static inline int sem_lock(struct sem_array *sma, struct sembuf *sops,
 
 		/* Prevent parallel simple ops */
 		complexmode_enter(sma);
-		return -1;
+		return SEM_GLOBAL_LOCK;
 	}
 
 	/*
@@ -348,20 +361,24 @@ static inline int sem_lock(struct sem_array *sma, struct sembuf *sops,
 
 	/*
 	 * Initial check for complex_mode. Just an optimization,
-	 * no locking.
+	 * no locking, no memory barrier.
 	 */
-	if (!READ_ONCE(sma->complex_mode)) {
+	if (!sma->complex_mode) {
 		/*
 		 * It appears that no complex operation is around.
 		 * Acquire the per-semaphore lock.
 		 */
 		spin_lock(&sem->lock);
 
-		/* Now repeat the test for complex_mode.
-		 * A memory barrier is provided by the spin_lock()
-		 * above.
+		/*
+		 * See 51d7d5205d33
+		 * ("powerpc: Add smp_mb() to arch_spin_is_locked()"):
+		 * A full barrier is required: the write of sem->lock
+		 * must be visible before the read is executed
 		 */
-		if (!READ_ONCE(sma->complex_mode)) {
+		smp_mb();
+
+		if (!smp_load_acquire(&sma->complex_mode)) {
 			/* fast path successful! */
 			return sops->sem_num;
 		}
@@ -384,13 +401,13 @@ static inline int sem_lock(struct sem_array *sma, struct sembuf *sops,
 		 * full lock.
 		 */
 		complexmode_enter(sma);
-		return -1;
+		return SEM_GLOBAL_LOCK;
 	}
 }
 
 static inline void sem_unlock(struct sem_array *sma, int locknum)
 {
-	if (locknum == -1) {
+	if (locknum == SEM_GLOBAL_LOCK) {
 		unmerge_queues(sma);
 		complexmode_tryleave(sma);
 		ipc_unlock_object(&sma->sem_perm);
@@ -2094,6 +2111,8 @@ void exit_sem(struct task_struct *tsk)
 		struct sem_undo *un;
 		struct list_head tasks;
 		int semid, i;
+
+		cond_resched();
 
 		rcu_read_lock();
 		un = list_entry_rcu(ulp->list_proc.next,

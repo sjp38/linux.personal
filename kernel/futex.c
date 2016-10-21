@@ -410,13 +410,11 @@ static inline int hb_waiters_pending(struct futex_hash_bucket *hb)
 }
 
 /**
- * hb_insert_q - Insert futex_q into a hash bucket
- * @q:		Pointer to the futex_q object
- * @hb:		Pointer to the hash bucket
- * @prio:	Priority ordering for insertion
+ * hash_futex - Return the hash bucket in the global hash
+ * @key:	Pointer to the futex key for which the hash is calculated
  *
- * Inserts @q into the hash buckets @hb plist. Must be called with @hb->lock
- * held.
+ * We hash on the keys returned from get_futex_key (see below) and return the
+ * corresponding hash bucket in the global hash.
  */
 static inline void
 hb_insert_q(struct futex_q *q, struct futex_hash_bucket *hb, int prio)
@@ -453,41 +451,9 @@ static struct futex_hash_bucket *hash_global_futex(union futex_key *key)
 	return &futex_queues[hash & (futex_hashsize - 1)];
 }
 
-/**
- * hash_local_futex - Return the hash bucket in the task local cache
- * @uaddr:	The user space address of the futex
- * @prime:	The prime number for the modulo operation
- *
- * That's a primitive hash function, but it turned out to be the most
- * efficient one for the task local cache as we don't have anything to
- * mix in like we have for the global hash.
- */
-static inline unsigned int
-hash_local_futex(void __user *uaddr, unsigned int prime)
-{
-	return ((unsigned long) uaddr) % prime;
-}
 
 /**
- * hash_futex - Get the hash bucket for a futex
- *
- * Returns either the local or the global hash bucket which fits the key.
- *
- * In case of an attached futex, we already verified that the cache and the
- * slot exists, so we can unconditionally dereference it.
- */
-static struct futex_hash_bucket *hash_futex(union futex_key *key)
-{
-	struct futex_cache *tc = current->futex_cache;
-
-	if (!key->both.attached)
-		return hash_global_futex(key);
-
-	return &tc->slots[key->both.slot].fs->hb;
-}
-
-/**
- * match_futex - Check whether to futex keys are equal
+ * match_futex - Check whether two futex keys are equal
  * @key1:	Pointer to key1
  * @key2:	Pointer to key2
  *

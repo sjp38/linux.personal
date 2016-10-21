@@ -43,7 +43,10 @@ struct befs_sb_info {
 	u32 ag_shift;
 	u32 num_ags;
 
-	/* jornal log entry */
+	/* State of the superblock */
+	u32 flags;
+
+	/* Journal log entry */
 	befs_block_run log_blocks;
 	befs_off_t log_start;
 	befs_off_t log_end;
@@ -79,7 +82,7 @@ enum befs_err {
 	BEFS_BT_END,
 	BEFS_BT_EMPTY,
 	BEFS_BT_MATCH,
-	BEFS_BT_PARMATCH,
+	BEFS_BT_OVERFLOW,
 	BEFS_BT_NOT_FOUND
 };
 
