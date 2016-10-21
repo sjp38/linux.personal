@@ -261,7 +261,7 @@ Postscript 나 man page 로도 만들어질 수 있다::
 4.x 커널 트리
 ~~~~~~~~~~~~~
 
-4.x 커널들은 Linux Torvalds가 관리하며 https://kernel.org 의
+4.x 커널들은 Linus Torvalds가 관리하며 https://kernel.org 의
 pub/linux/kernel/v4.x/ 디렉토리에서 참조될 수 있다.개발 프로세스는 다음과 같다.
 
   - 새로운 커널이 배포되자마자 2주의 시간이 주어진다. 이 기간동은
@@ -359,9 +359,9 @@ http://patchwork.ozlabs.org/ 에 나열되어 있다.
 버그 보고
 ---------
 
-https://bugzilla.kernel.org는 리눅스 커널 개발자들이 커널의 버그를 추적하는 곳이다.
-사용자들은 발견한 모든 버그들을 보고하기 위하여 이 툴을 사용할 것을 권장한다.
-kernel bugzilla를 사용하는 자세한 방법은 다음을 참조하라.
+https://bugzilla.kernel.org는 리눅스 커널 개발자들이 커널의 버그를 추적하는
+곳이다. 사용자들은 발견한 모든 버그들을 보고하기 위하여 이 툴을 사용할 것을
+권장한다.  kernel bugzilla를 사용하는 자세한 방법은 다음을 참조하라.
 
     https://bugzilla.kernel.org/page.cgi?id=faq.html
 
