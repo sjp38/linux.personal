@@ -57,6 +57,14 @@ needed).
    gpu/index
    80211/index
 
+Korean translations
+-------------------
+
+.. toctree::
+   :maxdepth: 1
+
+   translations/ko_KR/index
+
 Indices and tables
 ==================
 
