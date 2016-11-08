@@ -12777,6 +12777,7 @@ F:	include/uapi/linux/virtio_console.h
 
 VIRTIO CORE, NET AND BLOCK DRIVERS
 M:	"Michael S. Tsirkin" <mst@redhat.com>
+M:	Jason Wang <jasowang@redhat.com>
 L:	virtualization@lists.linux-foundation.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/virtio/
@@ -12807,6 +12808,7 @@ F:	include/uapi/linux/virtio_gpu.h
 
 VIRTIO HOST (VHOST)
 M:	"Michael S. Tsirkin" <mst@redhat.com>
+M:	Jason Wang <jasowang@redhat.com>
 L:	kvm@vger.kernel.org
 L:	virtualization@lists.linux-foundation.org
 L:	netdev@vger.kernel.org
