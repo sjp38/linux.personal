@@ -113,7 +113,7 @@ Installation
     kernel version 2.6.25 and later. This and other versions of the 2.6 Linux
     kernel can be found at:
 
-    ftp://ftp.kernel.org/pub/linux/kernel/v2.6/
+    https://www.kernel.org/pub/linux/kernel/v2.6/
 
     Download the sources and place them in an appropriate location.
 
