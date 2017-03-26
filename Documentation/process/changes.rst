@@ -348,7 +348,7 @@ Make
 Binutils
 --------
 
-- <ftp://ftp.kernel.org/pub/linux/devel/binutils/>
+- <https://www.kernel.org/pub/linux/devel/binutils/>
 
 OpenSSL
 -------
@@ -361,17 +361,17 @@ System utilities
 Util-linux
 ----------
 
-- <ftp://ftp.kernel.org/pub/linux/utils/util-linux/>
+- <https://www.kernel.org/pub/linux/utils/util-linux/>
 
 Ksymoops
 --------
 
-- <ftp://ftp.kernel.org/pub/linux/utils/kernel/ksymoops/v2.4/>
+- <https://www.kernel.org/pub/linux/utils/kernel/ksymoops/v2.4/>
 
 Module-Init-Tools
 -----------------
 
-- <ftp://ftp.kernel.org/pub/linux/kernel/people/rusty/modules/>
+- <https://www.kernel.org/pub/linux/utils/kernel/module-init-tools/>
 
 Mkinitrd
 --------
@@ -401,7 +401,7 @@ Xfsprogs
 Pcmciautils
 -----------
 
-- <ftp://ftp.kernel.org/pub/linux/utils/kernel/pcmcia/>
+- <https://www.kernel.org/pub/linux/utils/kernel/pcmcia/>
 
 Quota-tools
 -----------
