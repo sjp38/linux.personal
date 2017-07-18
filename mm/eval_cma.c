@@ -545,7 +545,11 @@ static int __init init_eval_cma(void)
 		return 0;
 	}
 
+#ifdef CONFIG_DMA_CMA
 	cma = dma_contiguous_default_area;
+#elif defined(CONFIG_TRANSPARENT_HUGEPAGE_CMA)
+	cma = thp_cma;
+#endif
 	eval_result_cache = KMEM_CACHE(eval_result, 0);
 	if (eval_result_cache == NULL) {
 		pr_warn("failed to create evaluation history cache\n");
