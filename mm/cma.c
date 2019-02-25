@@ -401,12 +401,12 @@ static inline void cma_debug_show_areas(struct cma *cma) { }
 int __init gcma_declare_contiguous(phys_addr_t base,
 			phys_addr_t size, phys_addr_t limit,
 			phys_addr_t alignment, unsigned int order_per_bit,
-			bool fixed, struct cma **res_cma)
+			bool fixed, const char *name, struct cma **res_cma)
 {
 	int ret = 0;
 
 	ret = __declare_contiguous(base, size, limit, alignment,
-			order_per_bit, fixed, NULL, res_cma);
+			order_per_bit, fixed, name, res_cma);
 	if (ret >= 0)
 		(*res_cma)->gcma = IS_GCMA;
 
@@ -420,7 +420,7 @@ int __init cma_declare_contiguous(phys_addr_t base,
 {
 #ifdef CONFIG_GCMA_DEFAULT
 	return gcma_declare_contiguous(base, size, limit, alignment,
-			order_per_bit, fixed, res_cma);
+			order_per_bit, fixed, name, res_cma);
 #else
 	int ret = 0;
 
