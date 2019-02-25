@@ -133,7 +133,7 @@ static int measure_cma(int nr_pages,
 	struct page *page;
 	struct timespec start, end;
 	getnstimeofday(&start);
-	page = cma_alloc(cma, nr_pages, 1);
+	page = cma_alloc(cma, nr_pages, 1, GFP_KERNEL);
 	getnstimeofday(&end);
 	*alloc_time = ns_to_us(time_diff(&start, &end));
 	if (!page) {
