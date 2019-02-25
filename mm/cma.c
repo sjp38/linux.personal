@@ -97,48 +97,12 @@ static void cma_clear_bitmap(struct cma *cma, unsigned long pfn,
 	mutex_unlock(&cma->lock);
 }
 
-/*
- * Return reserved pages for CMA to buddy allocator for using those pages
- * as movable pages.
- * Return 0 if it's called successfully. Otherwise, non-zero.
- */
-static int free_reserved_pages(unsigned long pfn, unsigned long count)
-{
-	int ret = 0;
-	unsigned long base_pfn;
-	struct zone *zone;
-
-	count = count >> pageblock_order;
-	zone = page_zone(pfn_to_page(pfn));
-
-	do {
-		unsigned i;
-
-		base_pfn = pfn;
-		for (i = pageblock_nr_pages; i; --i, pfn++) {
-			WARN_ON_ONCE(!pfn_valid(pfn));
-			/*
-			 * alloc_contig_range requires the pfn range
-			 * specified to be in the same zone. Make this
-			 * simple by forcing the entire CMA resv range
-			 * to be in the same zone.
-			 */
-			if (page_zone(pfn_to_page(pfn)) != zone) {
-				ret = -EINVAL;
-				break;
-			}
-		}
-		init_cma_reserved_pageblock(pfn_to_page(base_pfn));
-	} while (--count);
-
-	return ret;
-}
-
 static int __init cma_activate_area(struct cma *cma)
 {
 	int bitmap_size = BITS_TO_LONGS(cma_bitmap_maxno(cma)) * sizeof(long);
 	unsigned long base_pfn = cma->base_pfn, pfn = base_pfn;
-	int fail;
+	unsigned i = cma->count >> pageblock_order;
+	struct zone *zone;
 
 	cma->bitmap = kzalloc(bitmap_size, GFP_KERNEL);
 
@@ -147,14 +111,33 @@ static int __init cma_activate_area(struct cma *cma)
 
 	WARN_ON_ONCE(!pfn_valid(pfn));
 
-	if (cma->gcma == IS_GCMA)
-		fail = gcma_init(cma->base_pfn, cma->count, &cma->gcma);
-	else
-		fail = free_reserved_pages(cma->base_pfn, cma->count);
-	if (fail != 0) {
-		kfree(cma->bitmap);
-		return -EINVAL;
+	if (cma->gcma == IS_GCMA) {
+		if (gcma_init(cma->base_pfn, cma->count, &cma->gcma))
+			goto not_in_zone;
+		goto success;
 	}
+
+	zone = page_zone(pfn_to_page(pfn));
+
+	do {
+		unsigned j;
+
+		base_pfn = pfn;
+		for (j = pageblock_nr_pages; j; --j, pfn++) {
+			WARN_ON_ONCE(!pfn_valid(pfn));
+			/*
+			 * alloc_contig_range requires the pfn range
+			 * specified to be in the same zone. Make this
+			 * simple by forcing the entire CMA resv range
+			 * to be in the same zone.
+			 */
+			if (page_zone(pfn_to_page(pfn)) != zone)
+				goto not_in_zone;
+		}
+		init_cma_reserved_pageblock(pfn_to_page(base_pfn));
+	} while (--i);
+
+success:
 	mutex_init(&cma->lock);
 
 #ifdef CONFIG_CMA_DEBUGFS
@@ -423,7 +406,7 @@ int __init gcma_declare_contiguous(phys_addr_t base,
 	int ret = 0;
 
 	ret = __declare_contiguous(base, size, limit, alignment,
-			order_per_bit, fixed, res_cma);
+			order_per_bit, fixed, NULL, res_cma);
 	if (ret >= 0)
 		(*res_cma)->gcma = IS_GCMA;
 
@@ -433,7 +416,7 @@ int __init gcma_declare_contiguous(phys_addr_t base,
 int __init cma_declare_contiguous(phys_addr_t base,
 			phys_addr_t size, phys_addr_t limit,
 			phys_addr_t alignment, unsigned int order_per_bit,
-			bool fixed, struct cma **res_cma)
+			bool fixed, const char *name, struct cma **res_cma)
 {
 #ifdef CONFIG_GCMA_DEFAULT
 	return gcma_declare_contiguous(base, size, limit, alignment,
@@ -442,7 +425,7 @@ int __init cma_declare_contiguous(phys_addr_t base,
 	int ret = 0;
 
 	ret = __declare_contiguous(base, size, limit, alignment,
-			order_per_bit, fixed, res_cma);
+			order_per_bit, fixed, name, res_cma);
 
 	return ret;
 #endif
@@ -507,7 +490,7 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 		if (cma->gcma)
 			ret = gcma_alloc_contig(cma->gcma, pfn, count);
 		else
-			ret = alloc_contig_range(pfn, pfn + count, MIGRATE_CMA);
+			ret = alloc_contig_range(pfn, pfn + count, MIGRATE_CMA, gfp_mask);
 
 		mutex_unlock(&cma_mutex);
 		if (ret == 0) {
